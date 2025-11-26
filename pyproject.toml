@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "odoo-mcp-server"
+version = "0.1.0"
+description = "MCP server for Odoo operations via XML-RPC"
+authors = ["Elvz Team"]
+readme = "README.md"
+packages = [{include = "odoo_mcp"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+odoorpc = "^0.10.1"
+mcp = "^1.0.0"
+pydantic = "^2.0.0"
+pydantic-settings = "^2.0.0"
+loguru = "^0.7.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-asyncio = "^0.21.0"
+black = "^23.0.0"
+ruff = "^0.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']

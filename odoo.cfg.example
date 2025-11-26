@@ -1,0 +1,17 @@
+[odoo]
+# Odoo server URL (without http/https)
+url = your-odoo-server.com
+
+# Port (default: 8069 for HTTP, 443 for HTTPS)
+port = 8069
+
+# Protocol: jsonrpc or jsonrpc+ssl
+# Use jsonrpc+ssl for HTTPS connections
+protocol = jsonrpc+ssl
+
+# Database name
+database = your_database_name
+
+# Odoo credentials
+username = admin
+password = your_password
