@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Minha TV</string>
+
+    <!-- Home Screen -->
+    <string name="home_title">Minha TV</string>
+    <string name="sports_today">Jogos Hoje</string>
+    <string name="continue_watching">Continuar Assistindo</string>
+    <string name="watchlist">Quero Assistir</string>
+    <string name="history">Histórico</string>
+    <string name="chat">Chat AI</string>
+
+    <!-- Content Detail -->
+    <string name="watch_on">Assistir %1$s</string>
+    <string name="other_options">Outras Opções</string>
+    <string name="add_to_watchlist">Adicionar à Lista</string>
+    <string name="mark_watched">Já Assisti</string>
+    <string name="rating">⭐ %1$.1f</string>
+
+    <!-- Sports -->
+    <string name="football">Futebol</string>
+    <string name="nba">NBA</string>
+    <string name="live_now">AO VIVO</string>
+    <string name="broadcast_on">📺 %1$s</string>
+
+    <!-- Chat -->
+    <string name="chat_placeholder">Pergunte algo, como \"O que assistir hoje?\"</string>
+    <string name="send">Enviar</string>
+
+    <!-- General -->
+    <string name="loading">Carregando…</string>
+    <string name="error">Erro ao carregar dados</string>
+    <string name="retry">Tentar Novamente</string>
+    <string name="search">Buscar</string>
+</resources>
