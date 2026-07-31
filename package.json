@@ -1,0 +1,27 @@
+{
+  "name": "river-raid-3d",
+  "version": "0.1.0",
+  "description": "River Raid 3D — retrofit. Fase 1: greybox jogavel.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "shots": "node tools/shots.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:41729/git/emerzuc/sandbox"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "vite": "^7.3.6"
+  },
+  "private": true,
+  "type": "module"
+}

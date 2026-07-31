@@ -1,0 +1,91 @@
+<meta charset="utf-8" />
+<link rel="icon" href="data:,">
+<title>River Raid 3D — Fase 1 (greybox)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #14171a; overflow: hidden; }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    font: 500 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+    color: #e8eaed; text-shadow: 0 1px 3px rgba(0,0,0,.85);
+    letter-spacing: .04em;
+  }
+  .panel { position: absolute; padding: 14px 18px; }
+  #topleft  { top: 0; left: 0; }
+  #topright { top: 0; right: 0; text-align: right; }
+  #bottom   { left: 0; right: 0; bottom: 0; padding: 18px; display: flex; gap: 22px; align-items: flex-end; }
+
+  .label { font-size: 10px; opacity: .5; letter-spacing: .14em; text-transform: uppercase; }
+  .value { font-size: 22px; font-variant-numeric: tabular-nums; }
+
+  .bar { width: 260px; height: 9px; background: rgba(255,255,255,.12); border-radius: 1px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 100%; background: #e8eaed; transform-origin: left; transition: background .2s; }
+  .bar.warn > i { background: #ffb020; }
+  .bar.crit > i { background: #ff4d4d; }
+
+  #speedbar { width: 120px; }
+
+  #center {
+    position: absolute; inset: 0; display: grid; place-content: center;
+    text-align: center; gap: 10px;
+  }
+  #center.hidden { display: none; }
+  #center h1 { font-size: 30px; font-weight: 600; letter-spacing: .02em; }
+  #center p  { font-size: 13px; opacity: .62; }
+
+  #crosshair {
+    position: absolute; left: 50%; top: 58%; width: 16px; height: 16px;
+    margin: -8px 0 0 -8px; opacity: .45;
+  }
+  #crosshair::before, #crosshair::after {
+    content: ''; position: absolute; background: #e8eaed;
+  }
+  #crosshair::before { left: 7px; top: 0; width: 2px; height: 16px; }
+  #crosshair::after  { top: 7px; left: 0; height: 2px; width: 16px; }
+
+  #perf {
+    position: absolute; right: 0; bottom: 0; padding: 10px 14px;
+    font-size: 11px; opacity: .4; text-align: right; white-space: pre;
+  }
+</style>
+
+<div id="hud">
+  <div class="panel" id="topleft">
+    <div class="label">Score</div>
+    <div class="value" id="score">0</div>
+  </div>
+
+  <div class="panel" id="topright">
+    <div class="label">Aviões</div>
+    <div class="value" id="lives">3</div>
+  </div>
+
+  <div id="crosshair"></div>
+
+  <div class="panel" id="bottom">
+    <div>
+      <div class="label">Combustível</div>
+      <div class="bar" id="fuelbar"><i></i></div>
+    </div>
+    <div>
+      <div class="label">Velocidade</div>
+      <div class="bar" id="speedbar"><i></i></div>
+    </div>
+    <div>
+      <div class="label">Setor</div>
+      <div class="value" id="sector" style="font-size:15px">1</div>
+    </div>
+  </div>
+
+  <div id="center">
+    <h1 id="c-title">River Raid 3D</h1>
+    <p id="c-sub">A/D mover · W/S acelerar · Espaço atirar</p>
+  </div>
+
+  <div id="perf"></div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
