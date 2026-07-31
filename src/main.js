@@ -2,9 +2,15 @@ import * as THREE from 'three';
 import { Input } from './core/input.js';
 import { Autopilot } from './core/autopilot.js';
 import { Terrain } from './world/terrain.js';
-import { Game } from './game/game.js';
+import { Water } from './world/water.js';
+import { riverHalfWidth } from './world/river.js';
+import { Game, FUEL_MAX } from './game/game.js';
 import { CameraRig } from './view/rig.js';
+import { PostFX } from './view/post.js';
 import { Hud } from './view/hud.js';
+import { setupLighting } from './view/lighting.js';
+import { Audio } from './audio/audio.js';
+import { GRADE } from './art/direction.js';
 
 /**
  * Fixed 120 Hz simulation with render interpolation. The sim never sees a
@@ -23,40 +29,52 @@ const warpSeconds = parseFloat(params.get('warp') || '0');
 // ------------------------------------------------------------------ renderer
 
 const renderer = new THREE.WebGLRenderer({
-  antialias: true,
+  // The composer never draws the scene to the default framebuffer, so MSAA on
+  // the drawing buffer would allocate a multisampled target nothing renders
+  // into. Anti-aliasing is SMAA's job, inside the post chain.
+  antialias: false,
   powerPreference: 'high-performance',
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = GRADE.exposure;
+
+/**
+ * Every full-screen pass and the water's reflection pass are top-level
+ * renderer.render() calls, and each one resets `info` on entry. Left on
+ * autoReset, the stats would report only whatever the *last* pass submitted —
+ * about one draw call — which would quietly turn the harness's draw-call and
+ * triangle gates into decoration that can never fail. Reset once per frame
+ * instead, at the top, so the numbers cover the whole frame.
+ */
+renderer.info.autoReset = false;
+
 document.body.appendChild(renderer.domElement);
 
-const SKY = 0x9fb6c6;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(SKY);
-scene.fog = new THREE.Fog(SKY, 330, 930);
-
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 2200);
-
-// Key light is deliberately raking rather than overhead: with flat shading it
-// is the only thing separating one grey facet from the next.
-const key = new THREE.DirectionalLight(0xfff2e0, 2.1);
-key.position.set(-160, 190, 90);
-scene.add(key);
-scene.add(new THREE.HemisphereLight(0xbcd4e6, 0x4a4f52, 0.85));
 
 // ---------------------------------------------------------------------- game
 
+const audio = new Audio();
 const terrain = new Terrain(scene);
-const game = new Game(scene);
+const water = new Water(scene, renderer);
+const game = new Game(scene, audio);
 const rig = new CameraRig(camera);
+const lighting = setupLighting(scene, renderer);
+const post = new PostFX(renderer, scene, camera);
 const hud = new Hud();
 
 const keyboard = new Input(window);
 const autopilot = useAutopilot ? new Autopilot(game) : null;
 const input = autopilot ?? keyboard;
+
+// Browsers refuse to start an AudioContext outside a user gesture. resume() is
+// idempotent and cheap after the first success, so the simplest correct hook is
+// every keydown.
+window.addEventListener('keydown', () => audio.resume());
 
 terrain.prime(game.player.pos.z);
 
@@ -88,6 +106,8 @@ function frame(now) {
   last = now;
   const frameDt = Math.min(raw, MAX_FRAME);
 
+  renderer.info.reset();
+
   acc += frameDt;
   let steps = 0;
   while (acc >= DT && steps < 240) {
@@ -99,9 +119,31 @@ function frame(now) {
   const alpha = acc / DT;
 
   terrain.update(game.player.pos.z, 1);
+  lighting.update(frameDt, game.player.pos.z, game.player.pos.x);
   game.render(alpha);
+
+  // Effects run on the sim clock, not wall time, so a hitstop freezes them with
+  // the world — the held bright frame is the punch — and so the harness's
+  // seeded runs stay pixel-reproducible.
+  game.fx.update(frameDt, game.time);
+
+  // The water needs the camera's final pose for the frame: it renders its own
+  // mirrored view before the main pass.
   rig.update(frameDt, game);
-  renderer.render(scene, camera);
+  water.update(frameDt, game.time, game.player.pos.z, camera);
+
+  audio.update(frameDt, {
+    speed01: game.player.speed01,
+    fuel01: game.fuel / FUEL_MAX,
+    canyonHalfWidth: riverHalfWidth(game.player.pos.z),
+    alive: game.state === 'playing',
+    playerZ: game.player.pos.z,
+  });
+
+  // Replaces renderer.render: tone mapping now happens inside the grade pass,
+  // because three only applies renderer.toneMapping when drawing straight to
+  // the canvas and everything here goes through render targets first.
+  post.render(frameDt, game.time);
 
   // --- perf readout -------------------------------------------------------
   frameTimes[ftIndex] = raw * 1000;
@@ -129,6 +171,8 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  post.setSize(window.innerWidth, window.innerHeight);
+  water.setSize(window.innerWidth, window.innerHeight);
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -136,4 +180,4 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Handle for the screenshot / benchmark harness.
-window.__rr = { game, terrain, rig, renderer, scene, camera, DT, SIM_HZ };
+window.__rr = { game, terrain, water, rig, post, audio, renderer, scene, camera, DT, SIM_HZ };

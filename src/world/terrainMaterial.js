@@ -11,8 +11,9 @@ import { WORLD_SEED, riverCenterX, riverHalfWidth, islandAt, terrainHeight } fro
  *
  * Everything expensive happens once per chunk on the CPU (`decorateGeometry`),
  * because a chunk is built once and drawn for ~10 seconds of flight. The shader
- * only spends per-pixel work on the two things that cannot be baked: the
- * occlusion split between direct and indirect light, and aerial haze.
+ * only spends per-pixel work on what cannot be baked: splitting the occlusion
+ * between direct and indirect light, the bounce off the sunlit gorge wall, and
+ * aerial haze.
  *
  * FLAT SHADING IS KEPT, deliberately. It was doing real work in the greybox and
  * it does more work now: with a 2-unit grid the facets are small enough to read
@@ -52,12 +53,13 @@ const RW = SCALE.riverWidthTypical;
 const sstep = (t) => smoothstep(clamp01(t));
 
 // Ramp endpoints for the paint, as reciprocals so the hot loop has no divides.
-// Altitudes are expressed in bank heights and shore distances in typical river
-// widths, so the paint follows if the world's scale is ever retuned.
-// These are tuned against the world the generator actually makes, not against
-// an imagined one: over 400k sampled vertices the median slope is 0.05 and only
-// 4 % ever exceed 0.40, so the obvious-looking cliff threshold of 0.4 selected
-// nothing at all and left the whole valley one flat orange.
+// Altitudes are in bank heights and shore distances in typical river widths, so
+// the paint follows if the world's scale is ever retuned.
+//
+// The thresholds are measured against the terrain the generator actually makes,
+// not against an imagined one. Over 400k sampled vertices the median slope is
+// 0.05 and only 4 % ever exceed 0.40 — so the obvious-looking cliff threshold of
+// 0.4 selected almost nothing and left the whole valley one flat orange.
 const FACE_LO = -0.1; // dot(n, sun) at which rock starts warming up
 const FACE_INV = 1 / 0.7;
 /**
@@ -167,6 +169,41 @@ function boxBlur(src, dst, tmp, w, h, r) {
   }
 }
 
+// ------------------------------------------------------------- surface normal
+
+/**
+ * The paint cannot use the geometry's own vertex normals.
+ *
+ * `computeVertexNormals` averages the faces a vertex touches, and on the first
+ * and last row of a chunk half those faces are in the *next* chunk and do not
+ * exist yet. The two coincident rows at a seam therefore get different normals —
+ * measured at up to 0.61 apart — and since slope and sun-facing both drive the
+ * palette mix, that painted a bright or dark line across the valley every
+ * CHUNK_LEN units. Flat shading hid it in the lighting but not in the colour.
+ *
+ * So the paint takes its normal from a central difference of the height grid
+ * instead. That is a pure function of world position, so both sides of a seam
+ * agree exactly, and it is the true surface gradient rather than an average of
+ * whichever triangles happened to be built. The only samples that are not
+ * already in the vertex buffer are the two rows just outside the chunk: about
+ * 330 extra calls, against the 10 000 the mesh build already paid.
+ */
+function inferGrid(pos, count) {
+  const firstX = pos[0];
+  let cols = 0;
+  for (let i = 1; i < count; i++) {
+    // x ascends across a row and resets at the start of the next one.
+    if (pos[i * 3] <= firstX) { cols = i; break; }
+  }
+  if (cols < 3 || count % cols !== 0) return null;
+  const rows = count / cols;
+  if (rows < 3) return null;
+  return { cols, rows };
+}
+
+let edgeLo = null;
+let edgeHi = null;
+
 // ------------------------------------------------------------------ decorate
 
 /**
@@ -225,6 +262,32 @@ export function decorateGeometry(geometry) {
   }
   const rowStride = w * 2;
 
+  // --- surface gradient ----------------------------------------------------
+  const grid = inferGrid(pos, count);
+  let cols = 0;
+  let dxInv = 0;
+  let dxInvEdge = 0;
+  let dzInv = 0;
+  if (grid) {
+    cols = grid.cols;
+    const dx = pos[3] - pos[0];
+    const dz = pos[cols * 3 + 2] - pos[2];
+    dxInv = 0.5 / dx;
+    dzInv = 0.5 / dz;
+    dxInvEdge = 1 / dx;
+    if (!edgeLo || edgeLo.length < cols) {
+      edgeLo = new Float32Array(cols);
+      edgeHi = new Float32Array(cols);
+    }
+    const zLo = pos[2] - dz;
+    const zHi = pos[(count - 1) * 3 + 2] + dz;
+    for (let c = 0; c < cols; c++) {
+      const xc = pos[c * 3];
+      edgeLo[c] = terrainHeight(xc, zLo);
+      edgeHi[c] = terrainHeight(xc, zHi);
+    }
+  }
+
   // --- paint ---------------------------------------------------------------
   const col = new Float32Array(count * 3);
   // vec2: x = baked occlusion, y = how much the vertex faces the sun.
@@ -234,6 +297,7 @@ export function decorateGeometry(geometry) {
   // row-major with z constant across a row: ~60 evaluations per chunk instead
   // of 10 000. Falls back to recomputing per vertex if the order ever changes.
   let lastZ = NaN;
+  let col0 = 0; // column index, stepped rather than derived with a modulo
   let cx = 0;
   let hw = 0;
   let iAmt = 0;
@@ -260,9 +324,29 @@ export function decorateGeometry(geometry) {
     let sd = Math.abs(x - cx) - hw;
     if (iAmt > 0) sd = Math.max(sd, iHw - Math.abs(x - (cx + iOff)));
 
-    const nx = nrm[i3];
-    const ny = nrm[i3 + 1];
-    const nz = nrm[i3 + 2];
+    let nx;
+    let ny;
+    let nz;
+    if (grid) {
+      const c = col0;
+      if (++col0 === cols) col0 = 0;
+      const hxm = pos[(c > 0 ? i3 - 3 : i3) + 1];
+      const hxp = pos[(c < cols - 1 ? i3 + 3 : i3) + 1];
+      const hzm = i >= cols ? pos[i3 - cols * 3 + 1] : edgeLo[c];
+      const hzp = i + cols < count ? pos[i3 + cols * 3 + 1] : edgeHi[c];
+      // The world's edge columns get a one-sided difference over half the step;
+      // they are outside the play area and never on screen.
+      const gx = (hxp - hxm) * (c > 0 && c < cols - 1 ? dxInv : dxInvEdge);
+      const gz = (hzp - hzm) * dzInv;
+      const inv = 1 / Math.sqrt(gx * gx + 1 + gz * gz);
+      nx = -gx * inv;
+      ny = inv;
+      nz = -gz * inv;
+    } else {
+      nx = nrm[i3];
+      ny = nrm[i3 + 1];
+      nz = nrm[i3 + 2];
+    }
 
     const slope = clamp01(1 - ny);
 
@@ -353,12 +437,30 @@ export function decorateGeometry(geometry) {
 
 /**
  * How much of the baked occlusion reaches each light path. Not 1.0 even for the
- * ambient: with a 6:1 key-to-fill ratio, full occlusion on the fill crushes
- * every shadowed slope to black. The point of the bake is to shape depth, not
- * to remove light.
+ * ambient: with this key-to-fill ratio, full occlusion on the fill crushes every
+ * shadowed slope to black. The point of the bake is to shape depth, not to
+ * remove light.
  */
 const AO_INDIRECT = 0.85;
 const AO_DIRECT = 0.30;
+
+/**
+ * Bounce off the sunlit gorge wall, onto the one in shade.
+ *
+ * This is not decoration, it is missing physics. In a valley this steep the lit
+ * wall is a huge warm secondary source aimed straight at the dark wall, and
+ * neither a hemisphere light (sky above, ground below) nor a shadow map can
+ * express it. Without it the maths is unarguable and the picture is wrong: a
+ * hemisphere fill of PALETTE.ambientIntensity against a sun of
+ * PALETTE.sunIntensity renders the shaded bank at about 1/255 through ACES —
+ * measured, not estimated. Black is deep, but the brief asks for shadows that
+ * are deep *and* coloured, and there is no colour in black.
+ *
+ * The tint is PALETTE.ambientGround, which the palette already names as the warm
+ * ground bounce, so this introduces no new hue. Set BOUNCE to 0 to switch the
+ * whole effect off and get the literal reading of the palette back.
+ */
+const BOUNCE = 1.8;
 
 export function createTerrainMaterial() {
   const material = new THREE.MeshStandardMaterial({
@@ -373,6 +475,7 @@ export function createTerrainMaterial() {
   });
 
   const haze = new THREE.Color(ATMOSPHERE.fogColor);
+  const bounce = new THREE.Color(PALETTE.ambientGround).multiplyScalar(BOUNCE);
 
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uAoDirect = { value: AO_DIRECT };
@@ -381,18 +484,19 @@ export function createTerrainMaterial() {
     shader.uniforms.uHazeStrength = { value: ATMOSPHERE.hazeStrength };
     shader.uniforms.uHazeNear = { value: ATMOSPHERE.fogNear * 0.4 };
     shader.uniforms.uHazeFar = { value: ATMOSPHERE.fogFar };
+    shader.uniforms.uBounce = { value: bounce };
 
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
         `#include <common>
-        attribute float aOcclusion;
-        varying float vOcclusion;`
+        attribute vec2 aShade;
+        varying vec2 vShade;`
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-        vOcclusion = aOcclusion;`
+        vShade = aShade;`
       );
 
     shader.fragmentShader = shader.fragmentShader
@@ -405,7 +509,8 @@ export function createTerrainMaterial() {
         uniform float uHazeStrength;
         uniform float uHazeNear;
         uniform float uHazeFar;
-        varying float vOcclusion;`
+        uniform vec3 uBounce;
+        varying vec2 vShade;`
       )
       .replace(
         '#include <aomap_fragment>',
@@ -413,8 +518,13 @@ export function createTerrainMaterial() {
         // Occlusion is a sky-visibility term, so it belongs almost entirely to
         // the ambient. Letting a little of it touch the sun keeps the gorge
         // floor from flattening out when the sun rakes straight down it.
-        reflectedLight.indirectDiffuse *= mix( 1.0, vOcclusion, uAoIndirect );
-        reflectedLight.directDiffuse *= mix( 1.0, vOcclusion, uAoDirect );`
+        reflectedLight.indirectDiffuse *= mix( 1.0, vShade.x, uAoIndirect );
+        reflectedLight.directDiffuse *= mix( 1.0, vShade.x, uAoDirect );
+        // Bounce from the lit wall. Strongest exactly where the sun is not:
+        // it fills the terminator instead of doubling up on it. Occluded by the
+        // same bake, so it never lifts the bottom of the gorge back out.
+        reflectedLight.indirectDiffuse +=
+          uBounce * ( 1.0 - vShade.y ) * vShade.x * diffuseColor.rgb;`
       )
       .replace(
         '#include <opaque_fragment>',

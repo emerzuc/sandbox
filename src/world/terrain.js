@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { terrainHeight, WORLD_HALF_W, WATER_Y } from './river.js';
+import { terrainHeight, WORLD_HALF_W } from './river.js';
+import { createTerrainMaterial, decorateGeometry } from './terrainMaterial.js';
 
 export const CHUNK_LEN = 120;
 
@@ -47,6 +48,7 @@ function buildChunkGeometry(z0) {
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setIndex(new THREE.BufferAttribute(idx, 1));
   geo.computeVertexNormals();
+  decorateGeometry(geo);
   geo.computeBoundingSphere();
   return geo;
 }
@@ -61,27 +63,8 @@ export class Terrain {
     this.scene = scene;
     this.chunks = new Map();
 
-    this.material = new THREE.MeshStandardMaterial({
-      color: 0x8a8f94,
-      roughness: 0.95,
-      metalness: 0,
-      flatShading: true,
-    });
+    this.material = createTerrainMaterial();
 
-    this.water = new THREE.Mesh(
-      new THREE.PlaneGeometry(WORLD_HALF_W * 2, AHEAD + BEHIND),
-      new THREE.MeshStandardMaterial({
-        color: 0x2f4654,
-        roughness: 0.25,
-        metalness: 0.1,
-        transparent: true,
-        opacity: 0.88,
-      })
-    );
-    this.water.rotation.x = -Math.PI / 2;
-    this.water.position.y = WATER_Y;
-    this.water.renderOrder = 1;
-    scene.add(this.water);
   }
 
   /** @returns {number} chunks built this call */
@@ -94,7 +77,10 @@ export class Terrain {
       if (this.chunks.has(ci)) continue;
       const geo = buildChunkGeometry(ci * CHUNK_LEN);
       const mesh = new THREE.Mesh(geo, this.material);
-      mesh.receiveShadow = false;
+      // Terrain self-shadowing is what makes the gorge read as deep, and
+      // without castShadow there is nothing to cast.
+      mesh.receiveShadow = true;
+      mesh.castShadow = true;
       this.scene.add(mesh);
       this.chunks.set(ci, mesh);
       built++;
@@ -108,7 +94,6 @@ export class Terrain {
       }
     }
 
-    this.water.position.z = playerZ + (AHEAD - BEHIND) / 2;
     return built;
   }
 

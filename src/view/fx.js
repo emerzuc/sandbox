@@ -58,13 +58,23 @@ const mix = (a, b, t) => new THREE.Color().lerpColors(a, b, t);
 // Mixing happens in linear space, where explosionMid is roughly thirteen times
 // the luminance of explosionSmoke — so an even blend is still almost pure fire.
 // The weights below are what actually land where they read.
-const FIRE_A = [mix(C.core, C.mid, 0.35), C.mid, mix(C.core, C.mid, 0.75)];
+const FIRE_A = [C.mid, mix(C.core, C.mid, 0.6), C.mid];
 const FIRE_B = [mix(C.mid, C.smoke, 0.8), mix(C.mid, C.smoke, 0.95), C.smoke];
 const SMOKE_A = mix(C.mid, C.smoke, 0.92);
 const SMOKE_B = C.smoke;
 const EMBER_B = mix(C.mid, C.smoke, 0.6);
 const CHUNK_HOT = mix(C.mid, C.chunk, 0.45);
 const CHUNK_COLD = mix(C.chunk, C.smoke, 0.3);
+
+/**
+ * Explosions are lifted off their origin by this much per unit of scale. A
+ * fireball centred exactly on a ship sitting on the water has half its volume
+ * under the water plane, and with no depth texture to fade against, the depth
+ * test slices it along a dead-straight line. Lifting it puts the cut down in
+ * the dim lower fringe, where it reads as the blast sitting *on* the river
+ * instead of as a rectangle cut out of it.
+ */
+const LIFT = 2.5;
 
 // Tiles in the procedural atlas.
 const TILE_PUFF = 0;
@@ -198,7 +208,6 @@ const SPRITE_VERT = /* glsl */ `
     float ease = 1.0 - pow(1.0 - age, 3.0);
     float size = mix(aSize.x, aSize.y, ease);
 
-
     float rot = ph + aDyn.w * t;
     vec2 cs = vec2(cos(rot), sin(rot));
     vec2 q = position.xy * size;
@@ -219,10 +228,10 @@ const SPRITE_VERT = /* glsl */ `
     // its area behind the water, and the depth test slices it along a hard
     // line. There is no depth texture here to do a proper soft-particle fade
     // with, so the quad keeps its true screen position and size and only its
-    // *depth* is biased half a radius toward the camera — enough for a puff to
-    // sit in front of the surface it is sitting on, without the parallax error
-    // that moving the billboard itself would introduce.
-    float push = min(size * 0.5, -mv.z * 0.3);
+    // *depth* is biased toward the camera — enough for a puff to clear the
+    // surface it is resting on, without the parallax and scale error that
+    // actually moving the billboard would introduce.
+    float push = min(size * 0.75, -mv.z * 0.35);
     vec4 clip = projectionMatrix * mv;
     vec4 biased = projectionMatrix * vec4(mv.xy, mv.z + push, 1.0);
     gl_Position = vec4(clip.xy * (biased.w / clip.w), biased.z, biased.w);
@@ -395,7 +404,8 @@ class SpriteField {
     if (this.dirty) {
       // Re-uploading the whole ring on a spawn frame is a ~50 KB memcpy and
       // costs less than tracking dirty ranges across wraparound.
-      for (const a of this.attrs) a.needsUpdate = true;
+      // Indexed, not for-of: an iterator object per frame is still garbage.
+      for (let i = 0; i < this.attrs.length; i++) this.attrs[i].needsUpdate = true;
       this.dirty = false;
     }
     this.mesh.visible = clock < this.until;
@@ -415,9 +425,12 @@ function chunkGeometry() {
   const g = new THREE.IcosahedronGeometry(0.5, 0).toNonIndexed();
   const p = g.getAttribute('position');
   for (let i = 0; i < p.count; i++) {
-    const j = i - (i % 3);   // per triangle, so facets stay planar under flat shading
-    const s = 0.62 + hash1(j, 0x51ed) * 0.8;
-    p.setXYZ(i, p.getX(i) * s, p.getY(i) * (s * 0.85), p.getZ(i) * s);
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    // Keyed on the vertex position, not the vertex index, so the copies of a
+    // shared corner in different triangles all move together and the hull
+    // stays closed instead of splitting into unconnected shards.
+    const s = 0.6 + hash1(Math.round((x * 13.7 + y * 29.3 + z * 57.1) * 64), 0x51ed) * 0.85;
+    p.setXYZ(i, x * s, y * s * 0.85, z * s);
   }
   g.computeVertexNormals();
   return g;
@@ -445,8 +458,6 @@ class ChunkField {
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.frustumCulled = false;
     this.mesh.visible = false;
-    this.mesh.castShadow = false;
-    this.mesh.receiveShadow = false;
 
     this._m = new THREE.Matrix4();
     this._p = new THREE.Vector3();
@@ -514,9 +525,9 @@ class ChunkField {
       this._m.compose(this._p, this._q, this._s);
       this.mesh.setMatrixAt(i, this._m);
 
-      // Chunks leave the blast glowing and char within a few tenths. Diffuse
-      // only — a per-instance emissive would mean a bespoke shader for eleven
-      // boxes, and bloom picks up the bright orange well enough at this size.
+      // Chunks leave the blast glowing and char within half a second.
+      // Diffuse only: a per-instance emissive would mean a bespoke shader for a
+      // dozen lumps, and the embers already carry the actual light.
       this._c.copy(CHUNK_HOT).lerp(CHUNK_COLD, Math.min(1, age * 2.2));
       this.mesh.setColorAt(i, this._c);
     }
@@ -544,6 +555,7 @@ export class FX {
     this.chunks = new ChunkField(scene, CHUNK_CAP);
 
     this.clock = 0;
+    this.prev = 0;
     this.seq = 0;
     this.s = new Spawn();
 
@@ -573,7 +585,7 @@ export class FX {
     for (let i = 0; i < 2; i++) {
       s.reset();
       s.x = position.x + (hash1(n++, 3) - 0.5) * 2.4 * sc;
-      s.y = position.y + (hash1(n++, 5) - 0.5) * 2.0 * sc;
+      s.y = position.y + LIFT * sc + (hash1(n++, 5) - 0.5) * 2.0 * sc;
       s.z = position.z + (hash1(n++, 7) - 0.5) * 2.4 * sc;
       s.life = 0.12 + i * 0.05;
       s.size0 = 6 * sc;
@@ -597,14 +609,14 @@ export class FX {
       const dx = Math.cos(a) * r;
       const dy = u * 0.7 + 0.35;      // biased up: hot gas rises
       const dz = Math.sin(a) * r;
-      const shell = (1.2 + k * 2.8) * sc;
+      const shell = (2 + k * 4) * sc;
 
       s.reset();
       // Born on a shell rather than all at the same point. Forty puffs from one
       // origin integrate into a smooth ball; from a shell they stay legible as
       // puffs, which is the difference between a fireball and a light bulb.
       s.x = position.x + dx * shell;
-      s.y = position.y + dy * shell;
+      s.y = position.y + LIFT * sc + dy * shell;
       s.z = position.z + dz * shell;
       s.vx = dx * spd; s.vy = dy * spd; s.vz = dz * spd;
       s.delay = k * 0.05;
@@ -615,7 +627,7 @@ export class FX {
       s.grav = 5;
       s.phase = hash1(n++, 29) * TAU;
       s.roll = (k - 0.5) * 2.4;
-      s.opacity = 0.55;
+      s.opacity = 0.3;
       s.ca = FIRE_A[i % FIRE_A.length];
       s.cb = FIRE_B[i % FIRE_B.length];
       this.hot.emit(s, t);
@@ -658,21 +670,21 @@ export class FX {
       s.x = position.x + Math.cos(a) * rad * 3.5 * sc;
       s.y = position.y + (k - 0.2) * 2.5 * sc;
       s.z = position.z + Math.sin(a) * rad * 3.5 * sc;
-      s.vx = Math.cos(a) * (3 + rad * 6) * sc;
-      s.vy = (5 + k * 8) * sc;
-      s.vz = Math.sin(a) * (3 + rad * 6) * sc;
+      s.vx = Math.cos(a) * (1.5 + rad * 4) * sc;
+      s.vy = (7 + k * 13) * sc;
+      s.vz = Math.sin(a) * (1.5 + rad * 4) * sc;
       // Staggered: smoke that appears with the flash reads as a grey ball,
       // smoke that blooms out of the dying fireball reads as combustion.
-      s.delay = 0.06 + k * 0.3;
+      s.delay = 0.06 + k * 0.45;
       s.life = 1.3 + k * 1.2;
       s.size0 = 5 * sc;
-      s.size1 = (13 + k * 10) * sc;
+      s.size1 = (9 + k * 14) * sc;
       s.drag = 1.2;
       s.grav = 2.2;
       s.phase = hash1(n++, 67) * TAU;
       s.roll = (k - 0.5) * 1.1;
-      s.turb = 3 * sc;
-      s.opacity = 0.32 + k * 0.24;
+      s.turb = 4 * sc;
+      s.opacity = 0.15 + k * 0.2;
       s.tile = TILE_PUFF;
       s.ca = SMOKE_A;
       s.cb = SMOKE_B;
@@ -756,9 +768,9 @@ export class FX {
 
     s.reset();
     s.x = position.x; s.y = position.y; s.z = position.z;
-    s.life = 0.09;
-    s.size0 = 1.6;
-    s.size1 = 5.5;
+    s.life = 0.1;
+    s.size0 = 2;
+    s.size1 = 8;
     s.phase = hash1(n++, 137) * TAU;
     s.tile = TILE_FLARE;
     s.ca = C.core;
@@ -769,15 +781,15 @@ export class FX {
       const u = hash1(n++, 139) * 2 - 1;
       const a = hash1(n++, 149) * TAU;
       const r = Math.sqrt(Math.max(0, 1 - u * u));
-      const spd = 12 + hash1(n++, 151) * 16;
+      const spd = 14 + hash1(n++, 151) * 18;
 
       s.reset();
       s.x = position.x; s.y = position.y; s.z = position.z;
       s.vx = Math.cos(a) * r * spd;
       s.vy = (u * 0.4 + 0.6) * spd;
       s.vz = Math.sin(a) * r * spd;
-      s.life = 0.2 + hash1(n++, 157) * 0.16;
-      s.size0 = 0.8;
+      s.life = 0.22 + hash1(n++, 157) * 0.2;
+      s.size0 = 1.0;
       s.size1 = 0.2;
       s.drag = 2;
       s.grav = -GRAVITY * 0.5;
@@ -812,7 +824,17 @@ export class FX {
    * `dt` is only a fallback for callers that have no sim clock to give.
    */
   update(dt, time) {
-    this.clock = Number.isFinite(time) ? time : this.clock + dt;
+    // The clock is driven by the sim clock's *forward* delta rather than by its
+    // value, for two reasons. A restart sends game.time back to zero, and a
+    // particle's age is (now - birth): rewinding would put every dead particle
+    // back in the future and replay the last explosion of the previous life a
+    // few seconds into the next one. And the harness fast-forwards the sim by
+    // whole minutes between frames, which the clamp absorbs. Zero delta —
+    // hitstop — freezes the effects, which is the whole point.
+    const now = Number.isFinite(time) ? time : this.clock + dt;
+    const step = now - this.prev;
+    this.prev = now;
+    if (step > 0) this.clock += step < 0.25 ? step : 0.25;
 
     // Read the fog every frame rather than caching it: phase 2 will animate it,
     // and particles that ignore aerial perspective float in front of the world.

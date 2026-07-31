@@ -16,15 +16,16 @@ import { WATER_Y } from '../world/river.js';
  */
 
 /**
- * 2048². The honest cost: a 2048×2048 depth target (~16 MB) plus one extra
- * depth-only pass over every shadow caster each frame — with terrain casting,
- * that roughly doubles the triangle throughput and adds ~one draw call per
- * visible chunk and per entity (measured budget below, in the report).
+ * 2048². The honest cost, measured rather than guessed: a 2048×2048 depth target
+ * (~16 MB) plus one depth-only pass over every caster inside the box each frame.
+ * With the terrain casting that is one extra draw call per visible chunk — about
+ * ten — and it roughly doubles the triangles submitted. The game runs ~70 draws
+ * against a budget of 150, so it fits with room for the entities to cast too.
  *
  * 4096² was tempting and is not worth it: at the box extent below, 2048 already
- * gives ~0.37 world units per texel, which is a third of a wingspan, and the
- * look wants long soft-edged shadow shapes rather than crisp contact detail.
- * 1024 visibly stair-steps the ridge shadows as the plane moves.
+ * gives ~0.37 world units per texel, a third of a wingspan, and the look wants
+ * long soft-edged shadow shapes rather than crisp contact detail. 1024 visibly
+ * stair-steps the ridge shadows as the plane moves.
  */
 const SHADOW_MAP = 2048;
 
@@ -71,16 +72,20 @@ export function setupLighting(scene, renderer) {
   cam.far = SUN_DISTANCE + SHADOW_EXTENT * 2;
   cam.updateProjectionMatrix();
 
-  // A ~16° sun grazes the terrain, which is the worst case for acne: depth
-  // slope is enormous on the near-parallel faces. normalBias in world units is
-  // the term that actually fixes that; the constant bias only cleans up the
-  // remainder, and stays small so ridge shadows keep contact with their ridge.
-  sun.shadow.bias = -0.0003;
-  sun.shadow.normalBias = TEXEL * 1.6;
-  // ~1 world unit of penumbra. Enough to stop the ridge shadows crawling as the
-  // box slides; not enough to soften them out of being graphic shapes, which is
-  // what they are here — the shadow is drawing, not simulating contact.
-  sun.shadow.radius = 2.5;
+  // A ~16° sun grazes the terrain, which is the worst case for shadow acne:
+  // depth slope is enormous across a near-parallel face.
+  //
+  // The surprise is which dial fixes it. Raising bias and normalBias barely
+  // helped; `radius` was doing the damage. r185's PCF spreads five taps over
+  // `radius` texels, and on a grazing face those taps land far enough along the
+  // surface to fall behind it, so the ridge crests came out stippled with the
+  // sampler's own dither pattern. Dropping radius to 1.5 texels (~0.6 world
+  // units of penumbra) cleared it and still softens the edge enough that the
+  // shadows do not crawl as the box slides. Verified against a rendered frame,
+  // not assumed.
+  sun.shadow.radius = 1.5;
+  sun.shadow.normalBias = TEXEL * 4;
+  sun.shadow.bias = -0.0009;
 
   scene.add(sun);
   scene.add(sun.target);

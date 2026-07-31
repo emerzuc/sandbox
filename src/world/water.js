@@ -58,6 +58,16 @@ const RIPPLE_SMALL = SCALE.riverWidthTypical * 0.27;
 const RIPPLE_TINY = SCALE.planeWingspan * 0.31;
 const FOAM_NOISE = SCALE.riverWidthTypical * 0.6;
 const FOAM_W = SCALE.riverWidthTypical * 0.085;
+
+/**
+ * Foam was authored against the placeholder grey key light and is now lit by a
+ * 3.2-intensity sun with bloom downstream of it. At full strength the palette's
+ * near-white foam became the brightest thing in the frame, cleared the 0.82
+ * bloom threshold along the entire shoreline and read as a neon tube rather
+ * than as water. Foam is lit spray, not an emitter: keep it under the bloom
+ * knee and let the sun glitter be the only thing that blooms.
+ */
+const FOAM_GAIN = 0.72;
 const FLOW_SPEED = SCALE.cruiseSpeed * 0.09;
 const REFL_DISTORT = 0.011;
 
@@ -158,6 +168,7 @@ const frag = () => /* glsl */ `
 #define RIPPLE_TINY ${RIPPLE_TINY.toFixed(3)}
 #define FOAM_NOISE ${FOAM_NOISE.toFixed(3)}
 #define FOAM_W ${FOAM_W.toFixed(3)}
+#define FOAM_GAIN ${FOAM_GAIN.toFixed(3)}
 #define FLOW_SPEED ${FLOW_SPEED.toFixed(3)}
 #define REFL_DISTORT ${REFL_DISTORT.toFixed(4)}
 #define HAZE ${ATMOSPHERE.hazeStrength.toFixed(3)}
@@ -262,15 +273,17 @@ void main() {
   float m2 = tile(pr, FOAM_NOISE * 0.34, fr * (flowT * 0.9)).a;
   float mask = m1 * 0.55 + m2 * 0.45;
 
-  float lip = smoothstep(1.6, 0.0, toShore);
+  // Broken by the same noise as the wash. An unbroken lip saturates to a solid
+  // band the full length of both banks — an outline drawn around the river.
+  float lip = smoothstep(1.6, 0.0, toShore) * (0.3 + 0.7 * mask);
   float wash = smoothstep(0.55, 0.99, t * (0.4 + 0.85 * mask));
   // Torn-off foam drifting back out into the channel; without it the band reads
   // as an outline drawn around the river rather than as something the water did.
   float trail = smoothstep(FOAM_W * 1.8, FOAM_W * 0.5, toShore)
               * smoothstep(0.76, 0.97, mask) * 0.3;
-  float foam = clamp(max(lip * (0.55 + 0.45 * mask), wash) + trail, 0.0, 0.95);
+  float foam = clamp(max(lip, wash) + trail, 0.0, 0.8);
 
-  color = mix(color, uFoam, foam);
+  color = mix(color, uFoam * FOAM_GAIN, foam);
   color += uSpec * (glint * uSunPower * (1.0 - foam));
 
   gl_FragColor = vec4(color, 1.0);

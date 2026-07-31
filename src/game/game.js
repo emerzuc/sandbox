@@ -6,8 +6,8 @@ import {
 } from './entities.js';
 import { CHUNK_LEN } from '../world/terrain.js';
 import { shoreSDF, riverCenterX } from '../world/river.js';
-import { BULLET_GEO, DEBRIS_GEO, MAT } from '../view/shapes.js';
-import { makePlane } from '../view/shapes.js';
+import { BULLET_GEO, MAT, makePlane } from '../view/shapes.js';
+import { FX } from '../view/fx.js';
 import { clamp, clamp01 } from '../core/math.js';
 
 const SPAWN_AHEAD = 1020;
@@ -35,8 +35,10 @@ const HITSTOP_DEATH = 0.16;
 const DYING_TIME = 1.15;
 
 export class Game {
-  constructor(scene) {
+  constructor(scene, audio) {
     this.scene = scene;
+    this.audio = audio;
+    this.fx = new FX(scene);
     this.player = new Player();
 
     this.planeMesh = makePlane();
@@ -45,8 +47,6 @@ export class Game {
     this.ents = [];
     this.bullets = [];
     this.bulletPool = [];
-    this.debris = [];
-    this.debrisPool = [];
 
     this.bridgesDown = new Set();
     this.deaths = [];
@@ -98,8 +98,6 @@ export class Game {
     this.ents.length = 0;
     for (const b of this.bullets) this.recycleBullet(b);
     this.bullets.length = 0;
-    for (const d of this.debris) this.recycleDebris(d);
-    this.debris.length = 0;
   }
 
   spawnAhead() {
@@ -132,49 +130,14 @@ export class Game {
     b.mesh.position.copy(b.pos);
     this.scene.add(b.mesh);
     this.bullets.push(b);
+    this.fx.muzzle(b.pos);
+    this.audio?.event('shot');
     p.fireCooldown = FIRE_COOLDOWN;
   }
 
   recycleBullet(b) {
     this.scene.remove(b.mesh);
     this.bulletPool.push(b);
-  }
-
-  // ------------------------------------------------------------------ debris
-
-  spawnDebris(at, count, spread = 26) {
-    for (let i = 0; i < count; i++) {
-      let d = this.debrisPool.pop();
-      if (!d) {
-        d = {
-          pos: new THREE.Vector3(),
-          prevPos: new THREE.Vector3(),
-          vel: new THREE.Vector3(),
-          spin: new THREE.Vector3(),
-          life: 0,
-          mesh: new THREE.Mesh(DEBRIS_GEO, MAT.hostile),
-        };
-      }
-      d.pos.copy(at);
-      d.prevPos.copy(at);
-      const a = (i / count) * Math.PI * 2 + this.time;
-      d.vel.set(
-        Math.cos(a) * spread * (0.4 + (i % 3) * 0.3),
-        14 + (i % 4) * 7,
-        Math.sin(a) * spread * (0.4 + (i % 3) * 0.3)
-      );
-      d.spin.set(4 + i, 3 + i * 0.7, 5 - i * 0.4);
-      d.life = 1.0 + (i % 3) * 0.25;
-      const s = 0.6 + (i % 4) * 0.35;
-      d.mesh.scale.setScalar(s);
-      this.scene.add(d.mesh);
-      this.debris.push(d);
-    }
-  }
-
-  recycleDebris(d) {
-    this.scene.remove(d.mesh);
-    this.debrisPool.push(d);
   }
 
   // -------------------------------------------------------------------- feel
@@ -203,7 +166,6 @@ export class Game {
     }
 
     if (this.state === 'dying') {
-      this.stepDebris(dt);
       this.dyingT -= dt;
       if (this.dyingT <= 0) this.afterDeath();
       return;
@@ -216,12 +178,14 @@ export class Game {
     else if (input.consumeFire() && p.fireCooldown <= 0) this.fire();
     else input.consumeFire();
 
+    const fuelBefore = this.fuel;
     this.fuel -= (FUEL_DRAIN_BASE + p.speed01 * FUEL_DRAIN_SPEED) * dt;
+    const lowMark = FUEL_MAX * 0.3;
+    if (fuelBefore >= lowMark && this.fuel < lowMark) this.audio?.event('lowfuel');
 
     this.spawnAhead();
     this.stepBullets(dt);
     this.stepEnts(dt);
-    this.stepDebris(dt);
     this.collide(dt);
 
     if (this.fuel <= 0) {
@@ -251,20 +215,6 @@ export class Game {
       if (e.pos.z < behind) {
         this.remove(e);
         this.ents.splice(i, 1);
-      }
-    }
-  }
-
-  stepDebris(dt) {
-    for (let i = this.debris.length - 1; i >= 0; i--) {
-      const d = this.debris[i];
-      d.prevPos.copy(d.pos);
-      d.vel.y -= 62 * dt;
-      d.pos.addScaledVector(d.vel, dt);
-      d.life -= dt;
-      if (d.life <= 0) {
-        this.recycleDebris(d);
-        this.debris.splice(i, 1);
       }
     }
   }
@@ -322,6 +272,7 @@ export class Game {
 
       if (e.kind === 'fuel') {
         this.fuel = Math.min(FUEL_MAX, this.fuel + FUEL_REFILL * dt);
+        this.audio?.event('refuel');
       } else {
         this.die(e.kind);
         return;
@@ -346,13 +297,21 @@ export class Game {
   destroy(e, index) {
     this.score += SPEC[e.kind].score;
 
+    // Pan is relative to the player, not the camera: the camera is locked
+    // behind the plane, so the two agree and this is the cheaper of the pair.
+    const pan = clamp((e.pos.x - this.player.pos.x) / 40, -1, 1);
+
     if (e.kind === 'bridge') {
       this.bridgesDown.add(e.sector);
       this.checkpointZ = e.pos.z + 45;
-      this.spawnDebris(e.pos, 16, 40);
+      this.fx.explosion(e.pos, 2.5);
+      this.audio?.event('bridge', { pan });
       this.kick(0.85, HITSTOP_BRIDGE);
     } else {
-      this.spawnDebris(e.pos, 7, 24);
+      // The depot has a 9-unit radius and reads as a much bigger object than a
+      // patrol boat; a same-sized blast on it looks like a bug.
+      this.fx.explosion(e.pos, e.kind === 'fuel' ? 1.5 : 1);
+      this.audio?.event('explosion', { pan });
       this.kick(e.kind === 'jet' ? 0.4 : 0.3, HITSTOP_KILL);
     }
 
@@ -365,7 +324,8 @@ export class Game {
     this.deaths.push({ cause, z: Math.round(this.player.pos.z), t: +this.time.toFixed(1) });
     this.state = 'dying';
     this.dyingT = DYING_TIME;
-    this.spawnDebris(this.player.pos, 14, 30);
+    this.fx.explosion(this.player.pos, 1.6);
+    this.audio?.event('death', { cause });
     this.kick(1, HITSTOP_DEATH);
   }
 
@@ -397,15 +357,6 @@ export class Game {
 
     for (const e of this.ents) syncEntityMesh(e, alpha);
     for (const b of this.bullets) b.mesh.position.lerpVectors(b.prevPos, b.pos, alpha);
-
-    for (const d of this.debris) {
-      d.mesh.position.lerpVectors(d.prevPos, d.pos, alpha);
-      d.mesh.rotation.set(
-        this.time * d.spin.x,
-        this.time * d.spin.y,
-        this.time * d.spin.z
-      );
-    }
   }
 
   /** Camera shake amplitude, 0..1, with the usual squared falloff. */
