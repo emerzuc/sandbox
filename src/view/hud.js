@@ -2,10 +2,17 @@ import { FUEL_MAX } from '../game/game.js';
 import { clamp01 } from '../core/math.js';
 
 const $ = (id) => document.getElementById(id);
+const BEST_KEY = 'rr3d.best';
 
 export class Hud {
   constructor() {
     this.score = $('score');
+    this.best = $('best');
+    // Per-viewer, best effort: storage can be absent or throw (private window,
+    // sandboxed frame). The game must not care either way.
+    this.bestScore = 0;
+    try { this.bestScore = Math.max(0, +localStorage.getItem(BEST_KEY) || 0); } catch { /* no storage */ }
+    this.best.textContent = String(this.bestScore).padStart(5, '0');
     this.lives = $('lives');
     this.sector = $('sector');
     this.fuelBar = $('fuelbar');
@@ -62,8 +69,14 @@ export class Hud {
       const prev = this._lastState;
       this._lastState = game.state;
       if (game.state === 'gameover') {
-        this.title.textContent = 'Fim de jogo';
-        this.sub.textContent = `Pontos ${game.score} · Setor ${game.sector} · Enter para reiniciar`;
+        const record = game.score > this.bestScore;
+        if (record) {
+          this.bestScore = game.score;
+          this.best.textContent = String(this.bestScore).padStart(5, '0');
+          try { localStorage.setItem(BEST_KEY, String(this.bestScore)); } catch { /* no storage */ }
+        }
+        this.title.textContent = record ? 'Novo recorde' : 'Fim de jogo';
+        this.sub.textContent = `Pontos ${game.score} · Setor ${game.sector} · Recorde ${this.bestScore} · Enter para reiniciar`;
         this.dismissed = false;
         this.introT = 0;
       } else if (prev === 'gameover') {

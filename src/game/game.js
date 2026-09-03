@@ -9,6 +9,8 @@ import { shoreSDF, riverCenterX } from '../world/river.js';
 import { BULLET_GEO, MAT, makePlane } from '../view/shapes.js';
 import { FX } from '../view/fx.js';
 import { clamp, clamp01, damp, lerp } from '../core/math.js';
+import { PALETTE } from '../art/direction.js';
+import { WATER_Y } from '../world/river.js';
 
 const SPAWN_AHEAD = 1020;
 const CULL_BEHIND = 90;
@@ -27,6 +29,14 @@ const BULLET_REL_SPEED = 205;
 const BULLET_LIFE = 2.6;
 
 const PLAYER_R = 3.2;
+
+// Hostile projectiles are owned here, not by the entities that fire them:
+// one pool, one collision path, one place to tune. Same dart as the player's
+// tracer in the hostile accent colour, so "that is coming at me" reads at a
+// glance.
+const HOSTILE_SHOT_LIFE = 3.2;
+const HOSTILE_SHOT_R = 1.7;
+const HOSTILE_MAT = new THREE.MeshBasicMaterial({ color: PALETTE.hostileAccent });
 
 const HITSTOP_KILL = 0.055;
 const HITSTOP_BRIDGE = 0.11;
@@ -74,6 +84,9 @@ export class Game {
     this.ents = [];
     this.bullets = [];
     this.bulletPool = [];
+    this.shots = [];
+    this.shotPool = [];
+    this._aim = new THREE.Vector3();
 
     this.bridgesDown = new Set();
     this.deaths = [];
@@ -136,6 +149,8 @@ export class Game {
     this.ents.length = 0;
     for (const b of this.bullets) this.recycleBullet(b);
     this.bullets.length = 0;
+    for (const s of this.shots) this.recycleShot(s);
+    this.shots.length = 0;
   }
 
   spawnAhead() {
@@ -176,6 +191,55 @@ export class Game {
   recycleBullet(b) {
     this.scene.remove(b.mesh);
     this.bulletPool.push(b);
+  }
+
+  // ------------------------------------------------------------ hostile fire
+
+  /** Contract for entities.js: spawn a straight-line hostile projectile. */
+  hostileFire(x, y, z, vx, vy, vz) {
+    let s = this.shotPool.pop();
+    if (!s) {
+      s = {
+        pos: new THREE.Vector3(),
+        prevPos: new THREE.Vector3(),
+        vel: new THREE.Vector3(),
+        life: 0,
+        mesh: new THREE.Mesh(BULLET_GEO, HOSTILE_MAT),
+      };
+    }
+    s.pos.set(x, y, z);
+    s.prevPos.copy(s.pos);
+    s.vel.set(vx, vy, vz);
+    s.life = HOSTILE_SHOT_LIFE;
+    s.mesh.position.copy(s.pos);
+    this._aim.copy(s.pos).add(s.vel);
+    s.mesh.lookAt(this._aim);
+    this.scene.add(s.mesh);
+    this.shots.push(s);
+  }
+
+  recycleShot(s) {
+    this.scene.remove(s.mesh);
+    this.shotPool.push(s);
+  }
+
+  stepShots(dt) {
+    const pz = this.player.pos.z;
+    for (let i = this.shots.length - 1; i >= 0; i--) {
+      const s = this.shots[i];
+      s.prevPos.copy(s.pos);
+      s.pos.addScaledVector(s.vel, dt);
+      s.life -= dt;
+      const gone = s.life <= 0 || s.pos.z < pz - 60 || s.pos.z > pz + SPAWN_AHEAD;
+      if (s.pos.y <= WATER_Y + 0.2) {
+        this.fx.impact(s.pos);
+        this.recycleShot(s);
+        this.shots.splice(i, 1);
+      } else if (gone) {
+        this.recycleShot(s);
+        this.shots.splice(i, 1);
+      }
+    }
   }
 
   // -------------------------------------------------------------------- feel
@@ -227,6 +291,7 @@ export class Game {
     this.spawnAhead();
     this.stepBullets(dt);
     this.stepEnts(dt);
+    this.stepShots(dt);
     this.collide(dt);
 
     if (this.fuel <= 0) {
@@ -283,7 +348,7 @@ export class Game {
     const behind = this.player.pos.z - CULL_BEHIND;
     for (let i = this.ents.length - 1; i >= 0; i--) {
       const e = this.ents[i];
-      stepEntity(e, dt, this.player);
+      stepEntity(e, dt, this.player, this);
       if (e.pos.z < behind) {
         this.remove(e);
         this.ents.splice(i, 1);
@@ -310,6 +375,17 @@ export class Game {
     }
 
     if (p.invuln > 0) return;
+
+    for (let i = this.shots.length - 1; i >= 0; i--) {
+      const s = this.shots[i];
+      const dx = p.pos.x - s.pos.x;
+      const dy = p.pos.y - s.pos.y;
+      const dz = p.pos.z - s.pos.z;
+      if (dx * dx + dy * dy + dz * dz < (PLAYER_R + HOSTILE_SHOT_R) ** 2) {
+        this.die('shot');
+        return;
+      }
+    }
 
     // Player vs. shoreline, against the same SDF the mesh was generated from —
     // so what looks like water always is water. The hull (centre and nose)
@@ -381,7 +457,7 @@ export class Game {
   }
 
   bulletHits(b, e) {
-    if (e.kind === 'rock') return false;
+    if (e.kind === 'rock' || SPEC[e.kind].shootable === false) return false;
     if (e.kind === 'bridge') {
       return (
         Math.abs(b.pos.z - e.pos.z) < 6 &&
@@ -458,6 +534,7 @@ export class Game {
 
     for (const e of this.ents) syncEntityMesh(e, alpha);
     for (const b of this.bullets) b.mesh.position.lerpVectors(b.prevPos, b.pos, alpha);
+    for (const s of this.shots) s.mesh.position.lerpVectors(s.prevPos, s.pos, alpha);
   }
 
   /** Camera shake amplitude, 0..1, with the usual squared falloff. */
