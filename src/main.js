@@ -180,4 +180,4 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Handle for the screenshot / benchmark harness.
-window.__rr = { game, terrain, water, rig, post, audio, renderer, scene, camera, DT, SIM_HZ };
+window.__rr = { game, terrain, water, rig, post, audio, renderer, scene, camera, DT, SIM_HZ, THREE };

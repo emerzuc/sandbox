@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { PALETTE, SCALE } from '../art/direction.js';
+import { guardFlatNormals } from './shaderGuards.js';
 
 /**
  * Entity models — "1982 box art made real".
@@ -34,8 +35,11 @@ import { PALETTE, SCALE } from '../art/direction.js';
 /** Value-only shift of a palette colour. Hue never leaves the palette. */
 const shade = (hex, k) => new THREE.Color(hex).multiplyScalar(k);
 
-const std = (color, opts = {}) =>
-  new THREE.MeshStandardMaterial({ color, roughness: 0.62, metalness: 0.1, flatShading: true, ...opts });
+const std = (color, opts = {}) => {
+  const m = new THREE.MeshStandardMaterial({ color, roughness: 0.62, metalness: 0.1, flatShading: true, ...opts });
+  m.onBeforeCompile = guardFlatNormals;
+  return m;
+};
 
 export const MAT = {
   // Player: near-white body, saturated red accents. Distinguishing the player

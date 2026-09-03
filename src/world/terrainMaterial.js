@@ -1,3 +1,4 @@
+import { guardFlatNormals } from '../view/shaderGuards.js';
 import * as THREE from 'three';
 import { PALETTE, ATMOSPHERE, SCALE } from '../art/direction.js';
 import { clamp01, smoothstep } from '../core/math.js';
@@ -478,6 +479,7 @@ export function createTerrainMaterial() {
   const bounce = new THREE.Color(PALETTE.ambientGround).multiplyScalar(BOUNCE);
 
   material.onBeforeCompile = (shader) => {
+    guardFlatNormals(shader);
     shader.uniforms.uAoDirect = { value: AO_DIRECT };
     shader.uniforms.uAoIndirect = { value: AO_INDIRECT };
     shader.uniforms.uHazeColor = { value: haze };

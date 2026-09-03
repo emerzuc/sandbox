@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import { preview } from 'vite';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { meanLuma } from './bisect.mjs';
 
 /**
  * Phase 1 verification harness.
@@ -53,9 +54,14 @@ for (const warp of WARPS) {
   // A missing favicon is not a rendering bug; everything else is.
   const ignorable = (t) => /favicon/i.test(t);
   page.on('console', (m) => {
-    if (m.type() !== 'error') return;
-    if (ignorable(m.text()) || ignorable(m.location()?.url || '')) return;
-    errors.push(m.text());
+    const text = m.text();
+    // Chrome reports a dropped draw call — a GL_INVALID_OPERATION, a shader
+    // that failed to link — as a *warning*. Gating on errors alone let a draw
+    // vanish silently every frame while the gate stayed green.
+    const glFault = /GL_INVALID|WebGL: INVALID|THREE\.WebGL(Program|Shader)|Shader Error/.test(text);
+    if (m.type() !== 'error' && !glFault) return;
+    if (ignorable(text) || ignorable(m.location()?.url || '')) return;
+    errors.push(text.replace(/\[\.WebGL-[^\]]+\]\s*/, '').slice(0, 140));
   });
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('requestfailed', (r) => {
@@ -83,6 +89,13 @@ for (const warp of WARPS) {
     };
   });
 
+  const shot = await page.screenshot();
+  await writeFile(`shots/t${String(warp).padStart(3, '0')}s.png`, shot);
+  // A frame that rendered nothing is the failure the whole harness exists to
+  // catch, and a screenshot of it looks exactly like a screenshot of a bug-free
+  // black scene. Measure it.
+  const luma = meanLuma(shot);
+
   const frameMs = await page.evaluate(
     () => new Promise((res) => {
       const samples = [];
@@ -105,9 +118,8 @@ for (const warp of WARPS) {
     })
   );
 
-  await page.screenshot({ path: `shots/t${String(warp).padStart(3, '0')}s.png` });
-
-  if (errors.length) problems.push(`t=${warp}s console: ${errors.slice(0, 3).join(' | ')}`);
+  if (errors.length) problems.push(`t=${warp}s console: ${[...new Set(errors)].slice(0, 3).join(' | ')}`);
+  if (luma < 5) problems.push(`t=${warp}s frame is black (luma ${luma})`);
   if (state.state !== 'playing') {
     problems.push(`t=${warp}s autopilot not flying (state=${state.state}, lives=${state.lives})`);
   }
@@ -121,7 +133,7 @@ for (const warp of WARPS) {
   if (state.draws > MAX_DRAW_CALLS) problems.push(`t=${warp}s ${state.draws} draw calls > ${MAX_DRAW_CALLS}`);
   if (state.tris > MAX_TRIANGLES) problems.push(`t=${warp}s ${state.tris} triangles > ${MAX_TRIANGLES}`);
 
-  report.push({ warp, ...state, ...frameMs });
+  report.push({ warp, luma, ...state, ...frameMs });
   if (state.deaths.length) {
     console.log('        deaths: ' + state.deaths.map((d) => `${d.cause}@z${d.z}`).join(', '));
   }
@@ -130,7 +142,7 @@ for (const warp of WARPS) {
     `score=${String(state.score).padStart(5)}  fuel=${String(state.fuel).padStart(3)}  ` +
     `lives=${state.lives}  ents=${String(state.ents).padStart(3)}  ` +
     `draws=${String(state.draws).padStart(3)}  tris=${(state.tris / 1000).toFixed(0)}k  ` +
-    `frame=${frameMs.median.toFixed(1)}/${frameMs.p95.toFixed(1)}ms`
+    `frame=${frameMs.median.toFixed(1)}/${frameMs.p95.toFixed(1)}ms  luma=${luma}`
   );
 
   await page.close();

@@ -200,10 +200,6 @@ void main() {
   vec4 field = texture2D(tField, fieldUv);
 
   float sd = (field.g * 2.0 - 1.0) * SDF_RANGE;
-  // The bank is exactly coplanar with the surface at sd = 0, so the quad is let
-  // a little way inland (polygon offset keeps it in front) and the foam is what
-  // covers the join — otherwise the shoreline is a z-fighting seam.
-  if (sd > 1.5) discard;
 
   float depth01 = field.r;
   float breakup = field.b;
@@ -285,6 +281,18 @@ void main() {
 
   color = mix(color, uFoam * FOAM_GAIN, foam);
   color += uSpec * (glint * uSunPower * (1.0 - foam));
+
+  // The bank is exactly coplanar with the surface at sd = 0, so the quad is let
+  // a little way inland (polygon offset keeps it in front) and the foam is what
+  // covers the join — otherwise the shoreline is a z-fighting seam.
+  //
+  // The discard is deliberately the LAST thing in the shader. Texture LOD comes
+  // from implicit derivatives across a 2x2 quad; discarding a fragment before
+  // its neighbours have sampled leaves their derivatives undefined, and on some
+  // implementations the sample comes back NaN. One NaN texel at the river's
+  // vanishing point, five bloom mips later, is a black frame. Intermittent —
+  // it needs the shoreline to cross a quad at the horizon just so.
+  if (sd > 1.5) discard;
 
   gl_FragColor = vec4(color, 1.0);
   #include <tonemapping_fragment>
