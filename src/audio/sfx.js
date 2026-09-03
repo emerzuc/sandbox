@@ -1,4 +1,5 @@
-import { gain, biquad, ping, sweep, Smoothed, SILENT } from './nodes.js';
+import { gain, biquad, shaper, ping, sweep, Smoothed, SILENT } from './nodes.js';
+import { saturationCurve } from './buffers.js';
 import { clamp, clamp01, lerp } from '../core/math.js';
 
 /**
@@ -23,6 +24,37 @@ const CAP = 22;
  * always silence a shot. Equal priorities fall back to oldest-first.
  */
 const PRIO = { shot: 1, nearmiss: 1, refuel: 2, heart: 2, explosion: 3, alarm: 3, bridge: 4, death: 5 };
+
+/**
+ * Alarm retrigger policy. The game fires 'lowfuel' once at the 30% crossing
+ * and then every ~4 s while the tank is under 20%, so the guard has to sit
+ * comfortably under that cadence (it used to be 2.2 s, which a slightly early
+ * repeat would have hit) while still absorbing a threshold that chatters.
+ * Repeats inside the window play softer: the crossing is the announcement,
+ * the cadence is a reminder under the heartbeat, not a second announcement.
+ */
+const ALARM_MIN_GAP = 1.6;
+const ALARM_REPEAT_WINDOW = 8;
+const ALARM_REPEAT_LEVEL = 0.75;
+
+/**
+ * Wingtip scrape. One persistent voice, pumped per frame like the refuel hiss,
+ * because the game fires 'scrape' every frame the tip is on the rock. HOLD is
+ * how long the grind survives without a frame: three frames at 60 Hz, so one
+ * dropped frame does not stutter it but the grind is gone a tenth of a second
+ * after the tip lifts. The wobble is stepped from the seeded PRNG every
+ * STEP seconds and glided between, so it is never periodic — an LFO on a
+ * screech is a siren.
+ */
+const SCRAPE_LEVEL = 0.16;
+const SCRAPE_HOLD = 0.05;
+const SCRAPE_ATTACK = 0.012;
+const SCRAPE_RELEASE = 0.025;
+const SCRAPE_RING_HZ = 2600;
+const SCRAPE_SPARK_HZ = 5400;
+const SCRAPE_WOBBLE = 0.12;
+const SCRAPE_STEP = [0.04, 0.09];
+const SCRAPE_CHATTER_MIN = 0.55;
 
 export class Sfx {
   constructor(ctx, dry, send, noise, rnd) {
@@ -63,10 +95,62 @@ export class Sfx {
     this.fillBp.connect(this.fillG);
     this.fillG.connect(dry);
     this.pFillF = new Smoothed(this.fillBp.frequency, 0.12, 5);
+
+    // --- wingtip scrape: metal on rock, one persistent voice ----------------
+    // Three bands off one white source — a resonant ring (the screech), a
+    // brighter spark band and a lowpassed body — summed, pushed hard into a
+    // saturator for grit, then chopped by a chatter gain. The chatter is what
+    // makes it skip along the rock instead of sanding it.
+    this.scrapeHold = 0;
+    this.scrapeOn = false;
+    this.scrapeStepT = 0;
+    this.scrapeLevel = 0;
+
+    this.scrapeSrc = ctx.createBufferSource();
+    this.scrapeSrc.buffer = noise;
+    this.scrapeSrc.loop = true;
+    this.scrapeSrc.playbackRate.value = 1;
+    this.scrapeHp = biquad(ctx, 'highpass', 1200, 0.7);
+    this.scrapeRing = biquad(ctx, 'bandpass', SCRAPE_RING_HZ, 9);
+    this.scrapeSpark = biquad(ctx, 'bandpass', SCRAPE_SPARK_HZ, 3);
+    this.scrapeSparkG = gain(ctx, 0.5);
+    this.scrapeBody = biquad(ctx, 'lowpass', 700, 1.0);
+    this.scrapeBodyG = gain(ctx, 0.55);
+    // Same tanh sandwich as the master: ×4 in, ceiling 1/3, ×3 out. The high-Q
+    // ring is small on its own; this is what turns it from a whistle into grit.
+    this.scrapeDrive = gain(ctx, 4);
+    this.scrapeSat = shaper(ctx, saturationCurve(3), '2x');
+    this.scrapeChatter = gain(ctx, 3);
+    this.scrapeG = gain(ctx, 0);
+    this.scrapePan = ctx.createStereoPanner();
+    this.scrapeSnd = gain(ctx, 0.22);
+
+    this.scrapeSrc.connect(this.scrapeHp);
+    this.scrapeHp.connect(this.scrapeRing);
+    this.scrapeHp.connect(this.scrapeSpark);
+    this.scrapeSrc.connect(this.scrapeBody);
+    this.scrapeRing.connect(this.scrapeDrive);
+    this.scrapeSpark.connect(this.scrapeSparkG);
+    this.scrapeSparkG.connect(this.scrapeDrive);
+    this.scrapeBody.connect(this.scrapeBodyG);
+    this.scrapeBodyG.connect(this.scrapeDrive);
+    this.scrapeDrive.connect(this.scrapeSat);
+    this.scrapeSat.connect(this.scrapeChatter);
+    this.scrapeChatter.connect(this.scrapeG);
+    this.scrapeG.connect(this.scrapePan);
+    this.scrapePan.connect(dry);
+    this.scrapeG.connect(this.scrapeSnd);
+    this.scrapeSnd.connect(send);
+
+    this.pScrapeRing = new Smoothed(this.scrapeRing.frequency, 0.04, 4);
+    this.pScrapeSpark = new Smoothed(this.scrapeSpark.frequency, 0.05, 8);
+    this.pScrapeChatter = new Smoothed(this.scrapeChatter.gain, 0.015, 0.01);
+    this.pScrapePan = new Smoothed(this.scrapePan.pan, 0.04, 0.01);
   }
 
   start(when) {
     this.fillSrc.start(when);
+    this.scrapeSrc.start(when);
   }
 
   // ------------------------------------------------------------ voice budget
@@ -393,10 +477,18 @@ export class Sfx {
     }
   }
 
-  /** Two-tone warning. Rate-limited hard: an alarm that nags is an alarm that gets muted. */
+  /**
+   * Two-tone warning. Rate-limited: an alarm that nags is an alarm that gets
+   * muted. The game's ~4 s cadence clears ALARM_MIN_GAP, so every scheduled
+   * sting plays, but a repeat inside the window plays as a reminder, not as
+   * the announcement, and the previous sting (0.6 s of life) is long gone
+   * before the next one starts, so they never stack.
+   */
   alarm(now, level) {
-    if (now - this.lastAlarm < 2.2) return;
+    if (now - this.lastAlarm < ALARM_MIN_GAP) return;
+    const repeat = this.lastAlarm >= 0 && now - this.lastAlarm < ALARM_REPEAT_WINDOW;
     this.lastAlarm = now;
+    if (repeat) level *= ALARM_REPEAT_LEVEL;
 
     const rec = this.#voice(now, 'alarm', 0.6, 0, 0.2);
     if (!rec) return;
@@ -411,6 +503,28 @@ export class Sfx {
       ping(g.gain, at, 0.13 * level, 0.006, 0.13);
       o.connect(g); g.connect(bp);
     }
+  }
+
+  /**
+   * Wingtip on the riverbank. Called every frame the tip is grinding; nothing
+   * is built here — the voice is persistent and this only opens it, aims it
+   * and re-arms the hold. The wobble itself is stepped in tick() so the grind
+   * keeps moving even if the caller's frame rate is ragged.
+   */
+  scrape(now, level, pan) {
+    this.scrapeHold = SCRAPE_HOLD;
+    const target = SCRAPE_LEVEL * level;
+    const g = this.scrapeG.gain;
+    if (!this.scrapeOn) {
+      this.scrapeOn = true;
+      this.scrapeStepT = 0; // first wobble step lands with the attack
+      g.setTargetAtTime(target, now, SCRAPE_ATTACK);
+      this.scrapeLevel = target;
+    } else if (Math.abs(target - this.scrapeLevel) > 0.004) {
+      g.setTargetAtTime(target, now, 0.05);
+      this.scrapeLevel = target;
+    }
+    this.pScrapePan.set(clamp(pan, -1, 1), now);
   }
 
   /**
@@ -455,6 +569,27 @@ export class Sfx {
         this.fillG.gain.setTargetAtTime(0, now, 0.07);
       }
     }
+
+    if (this.scrapeOn) {
+      this.scrapeHold -= dt;
+      if (this.scrapeHold <= 0) {
+        // The frames stopped: the tip is off the rock. Fast tau — silence in
+        // ~100 ms, no click.
+        this.scrapeOn = false;
+        this.scrapeG.gain.setTargetAtTime(0, now, SCRAPE_RELEASE);
+        return;
+      }
+      this.scrapeStepT -= dt;
+      if (this.scrapeStepT <= 0) {
+        // Stepped, not swept: metal skipping on rock catches and lets go at
+        // irregular intervals, and irregular is what the seeded stream gives.
+        const r = this.rnd;
+        this.scrapeStepT = lerp(SCRAPE_STEP[0], SCRAPE_STEP[1], r());
+        this.pScrapeRing.set(SCRAPE_RING_HZ * lerp(1 - SCRAPE_WOBBLE, 1 + SCRAPE_WOBBLE, r()), now);
+        this.pScrapeSpark.set(SCRAPE_SPARK_HZ * lerp(0.9, 1.1, r()), now);
+        this.pScrapeChatter.set(3 * lerp(SCRAPE_CHATTER_MIN, 1, r()), now);
+      }
+    }
   }
 
   /**
@@ -485,5 +620,7 @@ export class Sfx {
     this.#prune(now + 1e6);
     try { this.fillSrc.stop(now); } catch (_) { /* never started */ }
     try { this.fillG.disconnect(); } catch (_) { /* best effort */ }
+    try { this.scrapeSrc.stop(now); } catch (_) { /* never started */ }
+    try { this.scrapeG.disconnect(); } catch (_) { /* best effort */ }
   }
 }

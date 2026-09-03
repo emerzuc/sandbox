@@ -56,6 +56,11 @@ export const MAT = {
   fuel: std(PALETTE.fuelBody, { roughness: 0.55 }),
   bridge: std(PALETTE.bridgeBody),
 
+  // Scenery shares the terrain's own palette entries, so a prow rock reads as
+  // part of the island it announces rather than as a placed object.
+  rock: std(PALETTE.rockCliff, { roughness: 0.92 }),
+  rockTop: std(PALETTE.rockHigh, { roughness: 0.9 }),
+
   bullet: new THREE.MeshBasicMaterial({ color: PALETTE.tracer }),
 };
 
@@ -542,6 +547,33 @@ function buildBridge() {
   return assemble(parts);
 }
 
+/**
+ * Island prow. A tall pinnacle at the head of every island — the split in the
+ * channel announced from a distance, instead of discovered as an ambiguous
+ * sliver underfoot. Scenery: collision belongs to the land it stands on.
+ *
+ * Loft runs along +Z, so the pinnacle is built lying down and stood up with a
+ * single rotateX; the `oy` offsets become a lean along the river once it is
+ * upright, which keeps it from reading as a machined cone.
+ */
+function buildRock() {
+  const pinnacle = loft(OCT, [
+    sec(0, 4.4, 3.6, 0), sec(3.5, 3.9, 3.3, 0.3), sec(8, 2.7, 2.4, 0.9),
+    sec(12, 1.5, 1.3, 1.3), sec(15.5, 0, 0, 1.6),
+  ]).rotateX(-Math.PI / 2);
+  // The sun catches the last few metres: a pale cap on the same silhouette.
+  const cap = loft(OCT, [sec(11.2, 1.75, 1.5, 1.2), sec(15.5, 0, 0, 1.6)])
+    .rotateX(-Math.PI / 2).translate(0, 0.05, 0);
+  const spur = loft(OCT, [sec(0, 2.6, 2.2, 0), sec(4, 1.6, 1.4, -0.6), sec(7, 0, 0, -1.0)])
+    .rotateX(-Math.PI / 2).translate(3.2, 0, 1.4);
+  const skirt = loft(OCT, [sec(0, 7.2, 6.0, 0), sec(2.4, 5.4, 4.6, 0)])
+    .rotateX(-Math.PI / 2);
+  return assemble([
+    [MAT.rock, pinnacle], [MAT.rock, spur], [MAT.rock, skirt],
+    [MAT.rockTop, cap],
+  ]);
+}
+
 // ------------------------------------------------------------------ export
 
 const PLANE = buildPlane();
@@ -552,6 +584,7 @@ const TEMPLATES = {
   jet: buildJet(),
   fuel: buildFuel(),
   bridge: buildBridge(),
+  rock: buildRock(),
 };
 
 export function makePlane() {

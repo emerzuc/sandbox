@@ -12,7 +12,7 @@ const LAT_MAX = 48;
 const LAT_ACCEL = 260;
 const LAT_DECEL = 190;
 const SPEED_ACCEL = 46;
-const MAX_ROLL = 0.62;
+export const MAX_ROLL = 0.62;
 
 /**
  * Forward is +Z. Three's camera has local +X on the right of the screen and

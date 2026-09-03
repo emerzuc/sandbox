@@ -64,7 +64,14 @@ export function islandAt(z) {
   const t = clamp01((local - 0.18) / 0.5);
   if (t <= 0 || t >= 1) return ISLAND_NONE;
 
-  const amt = Math.sin(Math.PI * t);
+  // A steep prow and a long tail. The old sine envelope grew the island from
+  // nothing over a hundred units, which from the cockpit is an ambiguous
+  // sliver — is that the island or the bank? — until it is too late to pick a
+  // side. A head that reaches full width in ~25 units reads as a rock face
+  // from far away, and the choice is visible before it is forced.
+  const head = smoothstep(clamp01(t / 0.1));
+  const tail = 1 - smoothstep(clamp01((t - 0.72) / 0.28));
+  const amt = head * tail;
   const base = baseHalfWidth(z);
   const dir = hash1(band, WORLD_SEED ^ 4242) < 0.5 ? -1 : 1;
 

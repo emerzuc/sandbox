@@ -8,7 +8,7 @@ import { CHUNK_LEN } from '../world/terrain.js';
 import { shoreSDF, riverCenterX } from '../world/river.js';
 import { BULLET_GEO, MAT, makePlane } from '../view/shapes.js';
 import { FX } from '../view/fx.js';
-import { clamp, clamp01 } from '../core/math.js';
+import { clamp, clamp01, damp, lerp } from '../core/math.js';
 
 const SPAWN_AHEAD = 1020;
 const CULL_BEHIND = 90;
@@ -34,6 +34,33 @@ const HITSTOP_DEATH = 0.16;
 
 const DYING_TIME = 1.15;
 
+/**
+ * Low-fuel tension. The old ramp started at 0 when the tank crossed 30% and
+ * only reached 1 at empty, so the warning became unmistakable about four
+ * seconds before death — with the next depot nine seconds away. It warned of
+ * dying, not of needing fuel. Now it *steps in* at the threshold and climbs
+ * from there. The sim owns this clock; audio and HUD both read it, so the
+ * heartbeat you hear and the pulse you see are the same beat.
+ */
+const LOW_FUEL = 0.3;
+const LOW_FUEL_STEP = 0.35;
+const EMERGENCY_FUEL = 0.15;
+const ALARM_REPEAT = 4;
+
+/**
+ * A graze is a wingtip on rock with the hull still over water. It does not
+ * kill; it costs fuel — the game's real clock — twice: a bite on contact, and
+ * a leak for a few seconds after, so the punishment is visible on the gauge
+ * and pushes the player toward the next depot, which is where the risk lives.
+ */
+const GRAZE_BITE = 9;
+const LEAK_TIME = 4;
+const LEAK_MULT = 2.6;
+const GRAZE_PUSH = 28;
+const SPARK_INTERVAL = 0.045;
+const HULL_MARGIN = -1.2;
+const SHORE_WARN_RANGE = 8;
+
 export class Game {
   constructor(scene, audio) {
     this.scene = scene;
@@ -50,6 +77,7 @@ export class Game {
 
     this.bridgesDown = new Set();
     this.deaths = [];
+    this._tip = new THREE.Vector3();
 
     this.reset();
   }
@@ -68,6 +96,16 @@ export class Game {
     this.hitstop = 0;
     this.trauma = 0;
     this.time = 0;
+
+    this.lowMix = 0;
+    this.beatPhase = 0;
+    this.beatEdge = false;
+    this.alarmT = 0;
+    this.leakT = 0;
+    this.grazing = 0;
+    this.sparkT = 0;
+    this.shoreL = 0;
+    this.shoreR = 0;
 
     this.nextChunk = -1;
     this.player.reset(riverCenterX(0), 0);
@@ -166,6 +204,8 @@ export class Game {
     }
 
     if (this.state === 'dying') {
+      this.lowMix = damp(this.lowMix, 0, 3, dt);
+      this.beatEdge = false;
       this.dyingT -= dt;
       if (this.dyingT <= 0) this.afterDeath();
       return;
@@ -179,9 +219,10 @@ export class Game {
     else input.consumeFire();
 
     const fuelBefore = this.fuel;
-    this.fuel -= (FUEL_DRAIN_BASE + p.speed01 * FUEL_DRAIN_SPEED) * dt;
-    const lowMark = FUEL_MAX * 0.3;
-    if (fuelBefore >= lowMark && this.fuel < lowMark) this.audio?.event('lowfuel');
+    this.leakT = Math.max(0, this.leakT - dt);
+    const leak = this.leakT > 0 ? LEAK_MULT : 1;
+    this.fuel -= (FUEL_DRAIN_BASE + p.speed01 * FUEL_DRAIN_SPEED) * leak * dt;
+    this.stepTension(dt, fuelBefore);
 
     this.spawnAhead();
     this.stepBullets(dt);
@@ -192,6 +233,37 @@ export class Game {
       this.fuel = 0;
       this.die('fuel');
     }
+  }
+
+  stepTension(dt, fuelBefore) {
+    const fuel01 = this.fuel / FUEL_MAX;
+    const target = fuel01 < LOW_FUEL ? LOW_FUEL_STEP + (1 - LOW_FUEL_STEP) * (1 - fuel01 / LOW_FUEL) : 0;
+    this.lowMix = damp(this.lowMix, target, 1.8, dt);
+
+    this.beatEdge = false;
+    if (this.lowMix > 0.04) {
+      this.beatPhase += (dt * lerp(56, 150, this.lowMix)) / 60;
+      if (this.beatPhase >= 1) {
+        this.beatPhase -= 1;
+        this.beatEdge = true;
+      }
+    } else {
+      this.beatPhase = 0;
+    }
+
+    const lowMark = FUEL_MAX * LOW_FUEL;
+    this.alarmT -= dt;
+    if (fuelBefore >= lowMark && this.fuel < lowMark) {
+      this.audio?.event('lowfuel');
+      this.alarmT = ALARM_REPEAT;
+    } else if (fuel01 < 0.2 && this.alarmT <= 0) {
+      this.audio?.event('lowfuel');
+      this.alarmT = ALARM_REPEAT;
+    }
+  }
+
+  get emergency() {
+    return this.fuel / FUEL_MAX < EMERGENCY_FUEL;
   }
 
   stepBullets(dt) {
@@ -239,22 +311,50 @@ export class Game {
 
     if (p.invuln > 0) return;
 
-    // Player vs. shoreline. Sampled at both wingtips and slightly ahead of the
-    // nose, against the same SDF the mesh was generated from — so what looks
-    // like water always is water.
+    // Player vs. shoreline, against the same SDF the mesh was generated from —
+    // so what looks like water always is water. The hull (centre and nose)
+    // kills; a wingtip alone is a graze.
     const z = p.pos.z;
-    if (
-      shoreSDF(p.pos.x - WING_HALF, z) > -0.4 ||
-      shoreSDF(p.pos.x + WING_HALF, z) > -0.4 ||
-      shoreSDF(p.pos.x, z + 4.5) > -0.4
-    ) {
+    const sdL = shoreSDF(p.pos.x - WING_HALF, z);
+    const sdR = shoreSDF(p.pos.x + WING_HALF, z);
+    this.shoreL = clamp01(1 + sdL / SHORE_WARN_RANGE);
+    this.shoreR = clamp01(1 + sdR / SHORE_WARN_RANGE);
+
+    if (shoreSDF(p.pos.x, z) > HULL_MARGIN || shoreSDF(p.pos.x, z + 4.5) > HULL_MARGIN) {
       this.die('terrain');
       return;
+    }
+
+    const grazeL = sdL > -0.4;
+    const grazeR = sdR > -0.4;
+    if (grazeL || grazeR) {
+      // Both wings on rock means the channel is narrower than the plane, which
+      // the generator forbids; if it ever happens, it is a wall, not a graze.
+      if (grazeL && grazeR) { this.die('terrain'); return; }
+      const dir = grazeL ? 1 : -1;
+      if (!this.grazing) this.fuel = Math.max(0, this.fuel - GRAZE_BITE);
+      this.leakT = LEAK_TIME;
+      this.grazing = 1;
+      // Shove away from the wall; the bank angle follows from vx on its own.
+      p.vx = dir * Math.max(Math.abs(p.vx) * 0.4, GRAZE_PUSH);
+      this.kick(0.12, 0);
+      this.sparkT -= dt;
+      if (this.sparkT <= 0) {
+        this.sparkT = SPARK_INTERVAL;
+        this._tip.set(p.pos.x - dir * WING_HALF, p.pos.y, z);
+        this.fx.impact(this._tip);
+      }
+      this.audio?.event('scrape', { pan: -dir });
+    } else {
+      this.grazing = 0;
+      this.sparkT = 0;
     }
 
     // Player vs. entities.
     for (let i = this.ents.length - 1; i >= 0; i--) {
       const e = this.ents[i];
+
+      if (e.kind === 'rock') continue;
 
       if (e.kind === 'bridge') {
         if (Math.abs(z - e.pos.z) < 5.5 && Math.abs(p.pos.x - e.pos.x) < e.halfWidth) {
@@ -281,6 +381,7 @@ export class Game {
   }
 
   bulletHits(b, e) {
+    if (e.kind === 'rock') return false;
     if (e.kind === 'bridge') {
       return (
         Math.abs(b.pos.z - e.pos.z) < 6 &&

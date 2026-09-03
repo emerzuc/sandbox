@@ -34,10 +34,26 @@ const LOW_FUEL = 0.3;
 /** Master output once faded in. Headroom left deliberately: the limiter is a net, not a mixer. */
 const OUT_LEVEL = 0.85;
 
+/**
+ * Engine variant c: rate of the slow wander, in value-noise cells per second
+ * of *frame* time (so a paused tab does not jump it). Three octaves at 0.21
+ * put movement at ~5 s, ~2.4 s and ~1.2 s — never periodic, never still.
+ */
+const DRIFT_RATE = 0.21;
+/** Bank follows the stick at 10 Hz — the sim already damps roll at 9. */
+const ROLL_LAMBDA = 10;
+
+/** Fallback lub-dub spacing when the sim's beat cadence is not yet measurable. */
+const BEAT_PERIOD_MIN = 0.3;
+const BEAT_PERIOD_MAX = 1.2;
+
 export class Audio {
-  constructor() {
+  /** @param opts  { engine: 'a' | 'b' | 'c' } — bed variant, see ENGINE_TUNE in engine.js */
+  constructor(opts) {
     // Nothing here may touch Web Audio: this runs at module scope, long before
     // the player has clicked anything.
+    const engine = opts && opts.engine;
+    this.engineVariant = engine === 'b' || engine === 'c' ? engine : 'a';
     this.ctx = null;
     this.ready = false;
     this.failed = false;
@@ -55,8 +71,11 @@ export class Audio {
     this.aliveMix = 1;
     this.lowMix = 0;
     this.width = (HW_MIN + HW_MAX) * 0.5;
+    this.roll = 0;
+    this.driftT = 0;
 
     this.beatT = 0;
+    this.lastBeat = -1;
     this.misfireT = 0;
     this.wasAlive = true;
   }
@@ -165,7 +184,7 @@ export class Audio {
     // White, mono, short: one-shots read it at random offsets and rates.
     const burst = noiseBuffer(ctx, 1.7, AUDIO_SEED ^ 0xb22, false, 1, 0);
 
-    this.engine = new EngineBed(ctx, this.bedIn, bed);
+    this.engine = new EngineBed(ctx, this.bedIn, bed, this.engineVariant);
     this.sfx = new Sfx(ctx, this.dry, this.send, burst, this.rnd);
 
     this.pBed = new Smoothed(this.bedGain.gain, 0.25, 0.003);
@@ -195,7 +214,16 @@ export class Audio {
 
   /**
    * @param dt     frame seconds
-   * @param state  { speed01, fuel01, canyonHalfWidth, alive, playerZ }
+   * @param state  { speed01, fuel01, canyonHalfWidth, alive, playerZ,
+   *                 low01?, beat?, roll01? }
+   *
+   *   low01   0..1 tension, already damped by the sim. When present it *is*
+   *           the low-fuel mix: the sim owns the clock so the HUD pulse and
+   *           the heartbeat can share it. Absent, the old fuel01-derived ramp
+   *           runs as before.
+   *   beat    true on the frame a heartbeat fires. Only read when low01 is
+   *           present; otherwise the internal timer beats.
+   *   roll01  -1..1 bank, positive = right wing down. Engine variant c only.
    */
   update(dt, state) {
     if (!this.ready || !state) return;
@@ -212,21 +240,39 @@ export class Audio {
     const alive = state.alive === undefined ? true : !!state.alive;
     const hw = clamp(+state.canyonHalfWidth || 30, HW_MIN - 4, HW_MAX + 4);
     const z = +state.playerZ || 0;
+    const roll01 = clamp(+state.roll01 || 0, -1, 1);
+    const simClock = state.low01 !== undefined;
 
     this.speed = damp(this.speed, speed01, 6, d);
     this.width = damp(this.width, hw, 3, d);
+    this.roll = damp(this.roll, roll01, ROLL_LAMBDA, d);
     // Asymmetric: the engine dies faster than it comes back, which is what
     // respawning is supposed to feel like.
     this.aliveMix = damp(this.aliveMix, alive ? 1 : 0, alive ? 2.4 : 3.6, d);
 
-    const lowTarget = alive ? clamp01((LOW_FUEL - fuel01) / LOW_FUEL) : 0;
-    this.lowMix = damp(this.lowMix, lowTarget, 1.8, d);
+    if (simClock) {
+      // The sim's value arrives damped and, at the 30% crossing, stepped
+      // straight to ~0.35. Taken as-is: every param downstream sits behind a
+      // Smoothed with its own tau, so the step is a quick swell, not a click,
+      // and smoothing it again here would only make the warning late — which
+      // is the very thing the step was introduced to fix.
+      this.lowMix = clamp01(+state.low01 || 0);
+    } else {
+      const lowTarget = alive ? clamp01((LOW_FUEL - fuel01) / LOW_FUEL) : 0;
+      this.lowMix = damp(this.lowMix, lowTarget, 1.8, d);
+    }
 
     // Gusts are a function of *where the plane is*, not of when: same stretch
     // of river, same air. Two octaves is all this needs and it costs four hashes.
     const windMod = fbm1(z * 0.0021, AUDIO_SEED, 2);
+    // Drift is the opposite: a function of when, not where, so the bed keeps
+    // moving even when the plane hovers on a straight. Seeded, so it too is
+    // the same on every run. Cheap enough to compute for every variant; only
+    // c listens.
+    this.driftT += d;
+    const drift = fbm1(this.driftT * DRIFT_RATE, AUDIO_SEED ^ 0xd41f7, 3);
 
-    this.engine.update(now, this.speed, this.aliveMix, this.lowMix, windMod);
+    this.engine.update(now, this.speed, this.aliveMix, this.lowMix, windMod, this.roll, drift);
 
     // The bed steps back and goes dull as the tank empties. This is the point of
     // the whole low-fuel treatment: the tension is not a beep on top of the mix,
@@ -242,7 +288,7 @@ export class Audio {
 
     this.sfx.fuel01 = fuel01;
     this.sfx.tick(now, d);
-    this.#tension(now, d);
+    this.#tension(now, d, simClock, simClock && !!state.beat);
 
     // Everything below the explosion tier belongs to a plane that no longer
     // exists — shots in flight, the refuel blip, the heartbeat. Cut those; leave
@@ -251,19 +297,39 @@ export class Audio {
     this.wasAlive = alive;
   }
 
-  /** Heartbeat and misfires. Timers only — no nodes are built unless one fires. */
-  #tension(now, dt) {
+  /**
+   * Heartbeat and misfires. Timers only — no nodes are built unless one fires.
+   *
+   * `simClock` means the simulation owns the heartbeat: it fires on `beat`, so
+   * the HUD's edge pulse and the lub-dub are the same event. Misfires are the
+   * engine's business and stay on the internal jittered timer either way.
+   */
+  #tension(now, dt, simClock, beat) {
     if (this.lowMix < 0.04 || this.aliveMix < 0.5) {
       this.beatT = 0;
+      this.lastBeat = -1;
       this.misfireT = 0;
       return;
     }
 
-    const period = 60 / lerp(56, 150, this.lowMix);
-    this.beatT -= dt;
-    if (this.beatT <= 0) {
-      this.beatT = period;
-      this.sfx.heartbeat(now, 0.35 + 0.65 * this.lowMix, period);
+    const level = 0.35 + 0.65 * this.lowMix;
+    if (simClock) {
+      if (beat) {
+        // The lub-dub gap follows the measured cadence, so a sim that speeds
+        // the heart up gets a tighter second beat without telling us its BPM.
+        const period = this.lastBeat >= 0
+          ? clamp(now - this.lastBeat, BEAT_PERIOD_MIN, BEAT_PERIOD_MAX)
+          : 60 / lerp(56, 150, this.lowMix);
+        this.lastBeat = now;
+        this.sfx.heartbeat(now, level, period);
+      }
+    } else {
+      const period = 60 / lerp(56, 150, this.lowMix);
+      this.beatT -= dt;
+      if (this.beatT <= 0) {
+        this.beatT = period;
+        this.sfx.heartbeat(now, level, period);
+      }
     }
 
     this.misfireT -= dt;
@@ -278,8 +344,12 @@ export class Audio {
   // -------------------------------------------------------------------- events
 
   /**
-   * @param name  'shot' | 'explosion' | 'bridge' | 'death' | 'refuel' | 'lowfuel' | 'nearmiss'
+   * @param name  'shot' | 'explosion' | 'bridge' | 'death' | 'refuel' | 'lowfuel' | 'nearmiss' | 'scrape'
    * @param opts  optional { pan: -1..1, gain: number, cause: string }
+   *
+   * 'refuel' and 'scrape' are per-frame events: fire them every frame the
+   * condition holds and they pump one persistent voice each. 'lowfuel' may be
+   * fired on a cadence; the sting rate-limits itself.
    */
   event(name, opts) {
     if (!this.ready) return;
@@ -298,6 +368,7 @@ export class Audio {
         case 'refuel': this.sfx.refuel(now, level); break;
         case 'lowfuel': this.sfx.alarm(now, level); break;
         case 'nearmiss': this.sfx.nearmiss(now, level, pan); break;
+        case 'scrape': this.sfx.scrape(now, level, pan); break;
         default: break; // an unknown name is the caller's bug, not a crash
       }
     } catch (_) { /* a dropped sound must never take the frame with it */ }

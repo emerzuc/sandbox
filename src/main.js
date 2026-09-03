@@ -8,6 +8,8 @@ import { Game, FUEL_MAX } from './game/game.js';
 import { CameraRig } from './view/rig.js';
 import { PostFX } from './view/post.js';
 import { Hud } from './view/hud.js';
+import { PositionMarker } from './view/marker.js';
+import { MAX_ROLL } from './game/player.js';
 import { setupLighting } from './view/lighting.js';
 import { Audio } from './audio/audio.js';
 import { GRADE } from './art/direction.js';
@@ -25,6 +27,8 @@ const MAX_FRAME = 0.25;
 const params = new URLSearchParams(location.search);
 const useAutopilot = params.has('auto');
 const warpSeconds = parseFloat(params.get('warp') || '0');
+// Three engine sounds behind a switch, so the one with ears picks the winner.
+const engineVariant = params.get('engine') || 'a';
 
 // ------------------------------------------------------------------ renderer
 
@@ -58,7 +62,7 @@ const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerH
 
 // ---------------------------------------------------------------------- game
 
-const audio = new Audio();
+const audio = new Audio({ engine: engineVariant });
 const terrain = new Terrain(scene);
 const water = new Water(scene, renderer);
 const game = new Game(scene, audio);
@@ -72,6 +76,7 @@ const lighting = setupLighting(scene, renderer);
 renderer.shadowMap.autoUpdate = false;
 const post = new PostFX(renderer, scene, camera);
 const hud = new Hud();
+const marker = new PositionMarker(scene);
 
 const keyboard = new Input(window);
 const autopilot = useAutopilot ? new Autopilot(game) : null;
@@ -148,6 +153,7 @@ function frame(now) {
   lighting.update(frameDt, game.player.pos.z, game.player.pos.x);
   renderer.shadowMap.needsUpdate = true;
   game.render(alpha);
+  marker.update(game.planeMesh.position, game.state === 'playing');
 
   // Effects run on the sim clock, not wall time, so a hitstop freezes them with
   // the world — the held bright frame is the punch — and so the harness's
@@ -165,6 +171,10 @@ function frame(now) {
     canyonHalfWidth: riverHalfWidth(game.player.pos.z),
     alive: game.state === 'playing',
     playerZ: game.player.pos.z,
+    // The sim owns the tension clock; audio and HUD both follow it.
+    low01: game.lowMix,
+    beat: game.beatEdge,
+    roll01: game.player.roll / MAX_ROLL,
   });
 
   // Replaces renderer.render: tone mapping now happens inside the grade pass,

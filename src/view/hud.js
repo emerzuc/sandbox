@@ -15,6 +15,9 @@ export class Hud {
     this.title = $('c-title');
     this.sub = $('c-sub');
     this.perf = $('perf');
+    this.pulse = $('pulse');
+    this.edgeL = $('edgeL');
+    this.edgeR = $('edgeR');
 
     this.introT = 0;
     this.dismissed = false;
@@ -28,7 +31,24 @@ export class Hud {
 
     const f = clamp01(game.fuel / FUEL_MAX);
     this.fuelFill.style.transform = `scaleX(${f})`;
-    this.fuelBar.className = 'bar' + (f < 0.15 ? ' crit' : f < 0.32 ? ' warn' : '');
+    this.fuelBar.className =
+      'bar' + (f < 0.15 ? ' crit' : f < 0.3 ? ' warn' : '') + (game.leakT > 0 ? ' leak' : '');
+
+    // Heartbeat on the screen edge: a hard flash on the beat that decays until
+    // the next one, same clock the audio uses. Amber while warning, red once
+    // it is an emergency — and faster, because the sim's bpm climbs with it.
+    const playing = game.state === 'playing';
+    const beat = Math.pow(1 - game.beatPhase, 3);
+    this.pulse.style.opacity = playing ? (game.lowMix * (0.25 + 0.75 * beat)).toFixed(3) : '0';
+    this.pulse.classList.toggle('red', game.emergency);
+
+    // Bank proximity, per side. A graze turns the whole edge red.
+    const gl = game.grazing && game.shoreL >= game.shoreR;
+    const gr = game.grazing && game.shoreR > game.shoreL;
+    this.edgeL.style.opacity = playing ? (gl ? 1 : game.shoreL * game.shoreL).toFixed(3) : '0';
+    this.edgeR.style.opacity = playing ? (gr ? 1 : game.shoreR * game.shoreR).toFixed(3) : '0';
+    this.edgeL.classList.toggle('hit', gl);
+    this.edgeR.classList.toggle('hit', gr);
 
     this.speedFill.style.transform = `scaleX(${game.player.speed01.toFixed(3)})`;
 

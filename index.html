@@ -46,6 +46,22 @@
   #crosshair::before { left: 7px; top: 0; width: 2px; height: 16px; }
   #crosshair::after  { top: 7px; left: 0; height: 2px; width: 16px; }
 
+  /* Screen-edge signals. These live at the periphery because that is where the
+     eye is *not* — the horizon and the plane hold the fovea, and a colour
+     change on a small bar in a corner is invisible by construction. */
+  #pulse, #edgeL, #edgeR {
+    position: absolute; inset: 0; opacity: 0; will-change: opacity;
+  }
+  #pulse { box-shadow: inset 0 0 140px 46px rgba(255, 176, 32, .85); }
+  #pulse.red { box-shadow: inset 0 0 160px 60px rgba(255, 64, 64, .95); }
+  #edgeL { background: linear-gradient(to right, rgba(255, 176, 32, .55), transparent 22%); }
+  #edgeR { background: linear-gradient(to left,  rgba(255, 176, 32, .55), transparent 22%); }
+  #edgeL.hit { background: linear-gradient(to right, rgba(255, 80, 60, .8), transparent 26%); }
+  #edgeR.hit { background: linear-gradient(to left,  rgba(255, 80, 60, .8), transparent 26%); }
+
+  .bar.leak > i { animation: leak .32s steps(2, end) infinite; }
+  @keyframes leak { 50% { opacity: .35; } }
+
   #perf {
     position: absolute; right: 0; bottom: 0; padding: 10px 14px;
     font-size: 11px; opacity: .4; text-align: right; white-space: pre;
@@ -53,6 +69,9 @@
 </style>
 
 <div id="hud">
+  <div id="pulse"></div>
+  <div id="edgeL"></div>
+  <div id="edgeR"></div>
   <div class="panel" id="topleft">
     <div class="label">Score</div>
     <div class="value" id="score">0</div>

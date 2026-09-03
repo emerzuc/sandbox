@@ -2,9 +2,12 @@ import * as THREE from 'three';
 import { damp, lerp, clamp01 } from '../core/math.js';
 import { valueNoise1 } from '../core/rng.js';
 
-const BACK = 27;
-const UP = 12.5;
-const LOOK_AHEAD = 48;
+// Raised and pulled in after the playtest: the original is a top-down game, and
+// lateral position is what a chase camera hides. A few units of height buys
+// back some of the plan view without giving up the box-art horizon.
+const BACK = 25.5;
+const UP = 15.5;
+const LOOK_AHEAD = 46;
 
 const FOV_BASE = 60;
 const FOV_KICK = 11;

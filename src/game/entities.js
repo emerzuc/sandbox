@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mulberry32 } from '../core/rng.js';
 import { clamp, lerp } from '../core/math.js';
 import { CHUNK_LEN } from '../world/terrain.js';
-import { riverCenterX, riverHalfWidth, pickChannelX } from '../world/river.js';
+import { riverCenterX, riverHalfWidth, pickChannelX, islandAt } from '../world/river.js';
 import { makeEntityMesh } from '../view/shapes.js';
 
 export const BRIDGE_SPACING = 1000;
@@ -15,7 +15,13 @@ export const SPEC = {
   jet: { r: 4.4, score: 100, y: 7 },
   fuel: { r: 9.0, score: 80, y: 0 },
   bridge: { r: 0, score: 500, y: 7 },
+  rock: { r: 0, score: 0, y: 0 },
 };
+
+// Must match river.js: islands live in 460-unit bands and the head sits at
+// 18% into the band, reaching full width over the next 10% of it.
+const ISLAND_BAND = 460;
+const ISLAND_HEAD_AT = 0.18 + 0.1 * 0.5;
 
 function makeEntity(kind, x, y, z) {
   return {
@@ -62,6 +68,17 @@ export function spawnChunk(game, ci) {
     const fx = pickChannelX(fz, rnd, 7);
     if (fx === null) continue;
     game.add(makeEntity('fuel', fx, SPEC.fuel.y, fz));
+  }
+
+  // --- Island prows: one tall rock at the head of every island, so the split
+  // is announced from a distance instead of discovered underfoot. Scenery
+  // only — the land it stands on is what kills. ---
+  for (let b = Math.floor(z0 / ISLAND_BAND); b * ISLAND_BAND < z1; b++) {
+    const hz = (b + ISLAND_HEAD_AT) * ISLAND_BAND;
+    if (hz < z0 || hz >= z1) continue;
+    const isl = islandAt(hz);
+    if (isl.amt <= 0) continue;
+    game.add(makeEntity('rock', riverCenterX(hz) + isl.off, SPEC.rock.y, hz));
   }
 
   // --- Hostiles: density ramps with the sector. ---
