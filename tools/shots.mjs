@@ -83,7 +83,7 @@ for (const warp of WARPS) {
     if (!ignorable(r.url())) errors.push(`request failed: ${r.url()}`);
   });
 
-  await page.goto(`${base}/?auto&warp=${warp}`, { waitUntil: 'load' });
+  await page.goto(`${base}/?auto&warp=${warp}&lives=9`, { waitUntil: 'load' });
   await page.waitForFunction('window.__rr !== undefined', null, { timeout: 20000 });
   // Let the render loop settle so the perf numbers are steady state.
   await page.waitForTimeout(2500);
@@ -135,7 +135,9 @@ for (const warp of WARPS) {
 
   if (errors.length) problems.push(`t=${warp}s console: ${[...new Set(errors)].slice(0, 3).join(' | ')}`);
   if (luma < 5) problems.push(`t=${warp}s frame is black (luma ${luma})`);
-  if (state.state !== 'playing') {
+  // Mid-death with lives left is a 1.15 s transient the probe can land on;
+  // game over is the failure.
+  if (state.state !== 'playing' && !(state.state === 'dying' && state.lives > 0)) {
     problems.push(`t=${warp}s autopilot not flying (state=${state.state}, lives=${state.lives})`);
   }
   // A terrain death is a world-generation bug: the river produced something no
@@ -150,7 +152,8 @@ for (const warp of WARPS) {
 
   report.push({ warp, luma, ...state, ...frameMs });
   if (state.deaths.length) {
-    console.log('        deaths: ' + state.deaths.map((d) => `${d.cause}@z${d.z}`).join(', '));
+    console.log('        deaths: ' + state.deaths.map((d) =>
+      `${d.cause}@z${d.z}` + (d.from ? ` [from ${d.from} vel ${d.vel} at x${d.at[0]}]` : '')).join(', '));
   }
   console.log(
     `t=${String(warp).padStart(3)}s  z=${String(state.z).padStart(5)}  sector=${state.sector}  ` +

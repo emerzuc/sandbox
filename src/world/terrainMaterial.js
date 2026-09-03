@@ -1,6 +1,6 @@
 import { guardFlatNormals } from '../view/shaderGuards.js';
 import * as THREE from 'three';
-import { PALETTE, ATMOSPHERE, SCALE } from '../art/direction.js';
+import { PALETTE, ATMOSPHERE, SCALE, biomeAt } from '../art/direction.js';
 import { clamp01, smoothstep } from '../core/math.js';
 import { valueNoise2, hash2 } from '../core/rng.js';
 import { WORLD_SEED, riverCenterX, riverHalfWidth, islandAt, terrainHeight } from './river.js';
@@ -29,17 +29,40 @@ import { WORLD_SEED, riverCenterX, riverHalfWidth, islandAt, terrainHeight } fro
 
 // ---------------------------------------------------------------- palette prep
 
-/** Palette hexes -> linear working space, once. Vertex colours are never sRGB. */
-function lin(hex) {
-  const c = new THREE.Color(hex);
-  return [c.r, c.g, c.b];
-}
+/**
+ * The five paint colours for the vertex row being painted, linear (biomeAt
+ * hands over Colors already converted from hex; vertex colours are never sRGB).
+ *
+ * Refilled from biomeAt(z) once per row rather than once per module: the biome
+ * is a function of z, and a chunk is painted once and never repainted, so the
+ * row is the finest grain at which the blend band can be sampled without
+ * paying per vertex. Per row is ~60 calls a chunk, a few microseconds; per
+ * chunk would step the blend by 120/BIOME_BLEND = 30 % between neighbours and
+ * draw the seam the wide band exists to hide. Inside a band the five arrive
+ * already interpolated, so the partition below never changes shape — it only
+ * mixes what it is handed, and it still cannot produce a hue that is not one
+ * of the five.
+ */
+const PAINT = new Float64Array(15);
+const P_SAND = 0;
+const P_LIT = 3;
+const P_SHADOW = 6;
+const P_CLIFF = 9;
+const P_HIGH = 12;
 
-const C_SAND = lin(PALETTE.sand);
-const C_ROCK_LIT = lin(PALETTE.rockLit);
-const C_ROCK_SHADOW = lin(PALETTE.rockShadow);
-const C_ROCK_CLIFF = lin(PALETTE.rockCliff);
-const C_ROCK_HIGH = lin(PALETTE.rockHigh);
+function loadPaint(z) {
+  const b = biomeAt(z);
+  let c = b.sand;
+  PAINT[P_SAND] = c.r; PAINT[P_SAND + 1] = c.g; PAINT[P_SAND + 2] = c.b;
+  c = b.rockLit;
+  PAINT[P_LIT] = c.r; PAINT[P_LIT + 1] = c.g; PAINT[P_LIT + 2] = c.b;
+  c = b.rockShadow;
+  PAINT[P_SHADOW] = c.r; PAINT[P_SHADOW + 1] = c.g; PAINT[P_SHADOW + 2] = c.b;
+  c = b.rockCliff;
+  PAINT[P_CLIFF] = c.r; PAINT[P_CLIFF + 1] = c.g; PAINT[P_CLIFF + 2] = c.b;
+  c = b.rockHigh;
+  PAINT[P_HIGH] = c.r; PAINT[P_HIGH + 1] = c.g; PAINT[P_HIGH + 2] = c.b;
+}
 
 const SUN = (() => {
   const [x, y, z] = PALETTE.sunDirection;
@@ -294,9 +317,10 @@ export function decorateGeometry(geometry) {
   // vec2: x = baked occlusion, y = how much the vertex faces the sun.
   const shade = new Float32Array(count * 2);
 
-  // The shore terms depend only on z, and the chunk builder emits vertices
-  // row-major with z constant across a row: ~60 evaluations per chunk instead
-  // of 10 000. Falls back to recomputing per vertex if the order ever changes.
+  // The shore terms and the biome paint depend only on z, and the chunk builder
+  // emits vertices row-major with z constant across a row: ~60 evaluations per
+  // chunk instead of 10 000. Falls back to recomputing per vertex if the order
+  // ever changes.
   let lastZ = NaN;
   let col0 = 0; // column index, stepped rather than derived with a modulo
   let cx = 0;
@@ -313,6 +337,7 @@ export function decorateGeometry(geometry) {
 
     if (z !== lastZ) {
       lastZ = z;
+      loadPaint(z);
       cx = riverCenterX(z);
       hw = riverHalfWidth(z);
       const isl = islandAt(z);
@@ -387,12 +412,14 @@ export function decorateGeometry(geometry) {
     const wShadow = k3 * (1 - facing) * SHADE_MAX;
     const wLit = k3 - wShadow;
 
-    const r = C_SAND[0] * tSand + C_ROCK_HIGH[0] * wHigh + C_ROCK_CLIFF[0] * wCliff +
-      C_ROCK_LIT[0] * wLit + C_ROCK_SHADOW[0] * wShadow;
-    const g = C_SAND[1] * tSand + C_ROCK_HIGH[1] * wHigh + C_ROCK_CLIFF[1] * wCliff +
-      C_ROCK_LIT[1] * wLit + C_ROCK_SHADOW[1] * wShadow;
-    const b = C_SAND[2] * tSand + C_ROCK_HIGH[2] * wHigh + C_ROCK_CLIFF[2] * wCliff +
-      C_ROCK_LIT[2] * wLit + C_ROCK_SHADOW[2] * wShadow;
+    // Same operand order as the pre-biome paint: in biome 0 PAINT holds PALETTE
+    // verbatim and this must come out bit-identical, so nothing is reassociated.
+    const r = PAINT[P_SAND] * tSand + PAINT[P_HIGH] * wHigh + PAINT[P_CLIFF] * wCliff +
+      PAINT[P_LIT] * wLit + PAINT[P_SHADOW] * wShadow;
+    const g = PAINT[P_SAND + 1] * tSand + PAINT[P_HIGH + 1] * wHigh + PAINT[P_CLIFF + 1] * wCliff +
+      PAINT[P_LIT + 1] * wLit + PAINT[P_SHADOW + 1] * wShadow;
+    const b = PAINT[P_SAND + 2] * tSand + PAINT[P_HIGH + 2] * wHigh + PAINT[P_CLIFF + 2] * wCliff +
+      PAINT[P_LIT + 2] * wLit + PAINT[P_SHADOW + 2] * wShadow;
 
     // Value-only break-up: a scalar multiply cannot introduce a hue that is not
     // already in the palette. Two terms, because they fix different failures —
@@ -457,11 +484,41 @@ const AO_DIRECT = 0.30;
  * measured, not estimated. Black is deep, but the brief asks for shadows that
  * are deep *and* coloured, and there is no colour in black.
  *
- * The tint is PALETTE.ambientGround, which the palette already names as the warm
- * ground bounce, so this introduces no new hue. Set BOUNCE to 0 to switch the
- * whole effect off and get the literal reading of the palette back.
+ * The tint is the biome's ambientGround, which the palette already names as the
+ * warm ground bounce, so this introduces no new hue — and it follows the biome
+ * for the same reason it exists: a dark basalt wall throws less light back than
+ * an amber one. Set BOUNCE to 0 to switch the whole effect off and get the
+ * literal reading of the palette back.
  */
 const BOUNCE = 1.8;
+
+/**
+ * The uniforms that travel with the biome, owned here at module scope so the
+ * material's compiled program references them directly and a change lands
+ * without anybody keeping a handle on the material. Seeded with the amber
+ * desert so the first frame is exactly what it was before biomes.
+ */
+const ATMO = {
+  uHazeColor: { value: new THREE.Color(ATMOSPHERE.fogColor) },
+  uHazeStrength: { value: ATMOSPHERE.hazeStrength },
+  uHazeNear: { value: ATMOSPHERE.fogNear * 0.4 },
+  uHazeFar: { value: ATMOSPHERE.fogFar },
+  uBounce: { value: new THREE.Color(PALETTE.ambientGround).multiplyScalar(BOUNCE) },
+};
+
+/**
+ * Called by the light rig once per frame with its *damped* atmosphere — not
+ * with biomeAt() directly — so the haze painted on the rock and the fog in the
+ * air are the same air at the same moment. The haze's near distance keeps the
+ * 0.4 × fogNear relation it was tuned with. Copies in, holds no references.
+ */
+export function setTerrainAtmosphere(fogColor, fogNear, fogFar, hazeStrength, ambientGround) {
+  ATMO.uHazeColor.value.copy(fogColor);
+  ATMO.uHazeStrength.value = hazeStrength;
+  ATMO.uHazeNear.value = fogNear * 0.4;
+  ATMO.uHazeFar.value = fogFar;
+  ATMO.uBounce.value.copy(ambientGround).multiplyScalar(BOUNCE);
+}
 
 export function createTerrainMaterial() {
   const material = new THREE.MeshStandardMaterial({
@@ -475,18 +532,16 @@ export function createTerrainMaterial() {
     dithering: true,
   });
 
-  const haze = new THREE.Color(ATMOSPHERE.fogColor);
-  const bounce = new THREE.Color(PALETTE.ambientGround).multiplyScalar(BOUNCE);
-
   material.onBeforeCompile = (shader) => {
     guardFlatNormals(shader);
     shader.uniforms.uAoDirect = { value: AO_DIRECT };
     shader.uniforms.uAoIndirect = { value: AO_INDIRECT };
-    shader.uniforms.uHazeColor = { value: haze };
-    shader.uniforms.uHazeStrength = { value: ATMOSPHERE.hazeStrength };
-    shader.uniforms.uHazeNear = { value: ATMOSPHERE.fogNear * 0.4 };
-    shader.uniforms.uHazeFar = { value: ATMOSPHERE.fogFar };
-    shader.uniforms.uBounce = { value: bounce };
+    // Shared, not copied: these are the live biome uniforms (see ATMO).
+    shader.uniforms.uHazeColor = ATMO.uHazeColor;
+    shader.uniforms.uHazeStrength = ATMO.uHazeStrength;
+    shader.uniforms.uHazeNear = ATMO.uHazeNear;
+    shader.uniforms.uHazeFar = ATMO.uHazeFar;
+    shader.uniforms.uBounce = ATMO.uBounce;
 
     shader.vertexShader = shader.vertexShader
       .replace(

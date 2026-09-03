@@ -30,6 +30,15 @@ const BULLET_LIFE = 2.6;
 
 const PLAYER_R = 3.2;
 
+/**
+ * Entities live on their own render layer. The water's mirrored camera sees
+ * layer 0 only, so a boat's reflection — three or four draw calls, doubled,
+ * for a smudge under a hull — is never rendered; the plane stays on layer 0
+ * because its reflection is a position cue. Sector 6 runs ~27 entities, and
+ * this is the difference between 250 draws and the ceiling.
+ */
+const ENTITY_LAYER = 1;
+
 // Hostile projectiles are owned here, not by the entities that fire them:
 // one pool, one collision path, one place to tune. Same dart as the player's
 // tracer in the hostile accent colour, so "that is coming at me" reads at a
@@ -72,9 +81,10 @@ const HULL_MARGIN = -1.2;
 const SHORE_WARN_RANGE = 8;
 
 export class Game {
-  constructor(scene, audio) {
+  constructor(scene, audio, { lives = 3 } = {}) {
     this.scene = scene;
     this.audio = audio;
+    this.startLives = lives;
     this.fx = new FX(scene);
     this.player = new Player();
 
@@ -101,7 +111,7 @@ export class Game {
     this.deaths = [];
 
     this.score = 0;
-    this.lives = 3;
+    this.lives = this.startLives;
     this.fuel = FUEL_MAX;
     this.checkpointZ = 0;
     this.state = 'playing';
@@ -134,6 +144,7 @@ export class Game {
 
   add(e) {
     e.mesh = makeEntityMesh(e.kind);
+    e.mesh.traverse((o) => o.layers.set(ENTITY_LAYER));
     e.mesh.position.copy(e.pos);
     this.scene.add(e.mesh);
     this.ents.push(e);
@@ -203,12 +214,14 @@ export class Game {
         pos: new THREE.Vector3(),
         prevPos: new THREE.Vector3(),
         vel: new THREE.Vector3(),
+        origin: new THREE.Vector3(),
         life: 0,
         mesh: new THREE.Mesh(BULLET_GEO, HOSTILE_MAT),
       };
     }
     s.pos.set(x, y, z);
     s.prevPos.copy(s.pos);
+    s.origin.copy(s.pos);
     s.vel.set(vx, vy, vz);
     s.life = HOSTILE_SHOT_LIFE;
     s.mesh.position.copy(s.pos);
@@ -382,7 +395,11 @@ export class Game {
       const dy = p.pos.y - s.pos.y;
       const dz = p.pos.z - s.pos.z;
       if (dx * dx + dy * dy + dz * dz < (PLAYER_R + HOSTILE_SHOT_R) ** 2) {
-        this.die('shot');
+        this.die('shot', {
+          from: [Math.round(s.origin.x), Math.round(s.origin.y), Math.round(s.origin.z)],
+          vel: [Math.round(s.vel.x), Math.round(s.vel.y), Math.round(s.vel.z)],
+          at: [Math.round(p.pos.x), Math.round(p.pos.z)],
+        });
         return;
       }
     }
@@ -496,9 +513,9 @@ export class Game {
     this.ents.splice(index, 1);
   }
 
-  die(cause = 'unknown') {
+  die(cause = 'unknown', info = null) {
     if (this.state !== 'playing') return;
-    this.deaths.push({ cause, z: Math.round(this.player.pos.z), t: +this.time.toFixed(1) });
+    this.deaths.push({ cause, z: Math.round(this.player.pos.z), t: +this.time.toFixed(1), ...(info ?? {}) });
     this.state = 'dying';
     this.dyingT = DYING_TIME;
     this.fx.explosion(this.player.pos, 1.6);

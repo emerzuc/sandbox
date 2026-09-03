@@ -574,6 +574,101 @@ function buildRock() {
   ]);
 }
 
+/**
+ * Shore tank. Hull nose on +Z; the sim yaws it to face straight across the
+ * river and fits pitch and roll to the bank. The turret is a separate named
+ * group so entities.js can slew it toward the player — and the player, who
+ * cannot shoot this thing, has to *see* it come round. Hence the accent
+ * muzzle brake: the one bright point on the model is the end of the barrel.
+ * Sits on y = 0 at the bottom of its tracks.
+ */
+function buildTank() {
+  // Hull: slab sides, then a glacis that folds down and forward over the
+  // last section. Outline y runs 0.9..2.2 so the tracks show below it.
+  const HULL = [[-2.4, 0.9], [2.4, 0.9], [2.4, 2.2], [-2.4, 2.2]];
+  const hull = loft(HULL, [
+    sec(-3.6, 0.88, 0.9, 0.0),
+    sec(-2.8, 1, 1, 0),
+    sec(2.6, 1, 1, 0),
+    sec(4.0, 0.92, 0.55, 0.1),
+  ]);
+  const engineDeck = box(3.6, 0.3, 2.2).translate(0, 2.3, -2.2);
+
+  // Tracks: a run of roadwheels reads as one chamfered block at this range.
+  const TRACK = [[-0.75, 0], [0.75, 0], [0.75, 1.5], [-0.75, 1.5]];
+  const trackSecs = [
+    sec(-4.2, 0.8, 0.5, 0.5), sec(-3.4, 1, 1, 0),
+    sec(3.4, 1, 1, 0), sec(4.2, 0.8, 0.5, 0.5),
+  ];
+  const trackR = loft(TRACK, trackSecs).translate(2.95, 0, 0);
+  const trackL = loft(TRACK, trackSecs).translate(-2.95, 0, 0);
+  const fenderR = box(1.7, 0.16, 8.0).translate(2.95, 1.62, 0);
+  const fenderL = box(1.7, 0.16, 8.0).translate(-2.95, 1.62, 0);
+
+  const g = assemble([
+    [MAT.hostile, hull], [MAT.hostile, engineDeck],
+    [MAT.hostileDark, trackR], [MAT.hostileDark, trackL],
+    [MAT.hostileDark, fenderR], [MAT.hostileDark, fenderL],
+  ]);
+
+  // Turret: lofted along +Z and stood up, like the ship's. Pivot sits on the
+  // hull roof; entities.js drives rotation.y and a recoil on position.z.
+  const body = loft(OCT, [sec(0, 1.7, 1.55), sec(0.95, 1.65, 1.5), sec(1.35, 1.05, 0.95)])
+    .rotateX(-Math.PI / 2);
+  const mantlet = box(1.2, 0.9, 0.8).translate(0, 0.7, 1.5);
+  const barrel = tube(0.2, 0.24, 4.4, 6).rotateX(Math.PI / 2).translate(0, 0.72, 3.3);
+  const brake = tube(0.34, 0.34, 0.55, 6).rotateX(Math.PI / 2).translate(0, 0.72, 5.35);
+  const hatch = tube(0.55, 0.55, 0.3, 6).translate(-0.55, 1.42, -0.35);
+
+  const turret = assemble([
+    [MAT.hostileDark, body], [MAT.hostileDark, mantlet], [MAT.hostileDark, barrel],
+    [MAT.hostileAccent, brake], [MAT.hostileAccent, hatch],
+  ]);
+  turret.name = 'turret';
+  turret.position.set(0, 2.2, -0.4);
+  g.add(turret);
+
+  return g;
+}
+
+/**
+ * Barrage balloon. Blunt nose on -Z toward the oncoming player, three fins
+ * aft, a car underneath and a tether down to a float on the water — the
+ * tether is what says "this is fixed here; go round or shoot it". Everything
+ * stays inside the 5.4 collision sphere, fins included, so nothing on it can
+ * be flown through. Origin at the envelope's centre, at the entity's y.
+ */
+function buildBalloon() {
+  const envelope = loft(OCT, [
+    sec(-5.2, 0.3, 0.3, 0.1),
+    sec(-4.4, 1.9, 1.75, 0.1),
+    sec(-2.6, 3.2, 2.95, 0.05),
+    sec(0, 3.45, 3.15, 0),
+    sec(2.6, 2.95, 2.7, 0.05),
+    sec(4.4, 1.5, 1.35, 0.2),
+    sec(5.2, 0.3, 0.3, 0.3),
+  ]);
+  // Accent band, slightly proud of the envelope: a hostile is never plain grey.
+  const band = loft(OCT, [sec(-1.6, 3.5, 3.2), sec(-0.6, 3.55, 3.25)]);
+
+  const finShape = [[0, 2.0], [0, 4.2], [3.2, 4.4], [2.4, 2.6]];
+  const finTop = upright(finShape, 0.26).translate(0, 0.3, 0);
+  const finR = slab(finShape, 0.26).translate(1.2, -0.2, 0);
+  const finL = slab(mirrorX(finShape), 0.26).translate(-1.2, -0.2, 0);
+
+  const car = box(1.0, 0.7, 1.8).translate(0, -3.3, 0);
+  // Reaches a little below the waterline at the bottom of the sway.
+  const tether = tube(0.14, 0.14, 4.6, 4).translate(0, -5.9, 0);
+  const float = tube(0.9, 0.9, 0.5, 8).translate(0, -7.6, 0);
+
+  return assemble([
+    [MAT.hostile, envelope],
+    [MAT.hostileAccent, band],
+    [MAT.hostileDark, finTop], [MAT.hostileDark, finR], [MAT.hostileDark, finL],
+    [MAT.hostileDark, car], [MAT.hostileDark, tether], [MAT.hostileDark, float],
+  ]);
+}
+
 // ------------------------------------------------------------------ export
 
 const PLANE = buildPlane();
@@ -582,6 +677,8 @@ const TEMPLATES = {
   ship: buildShip(),
   heli: buildHeli(),
   jet: buildJet(),
+  tank: buildTank(),
+  balloon: buildBalloon(),
   fuel: buildFuel(),
   bridge: buildBridge(),
   rock: buildRock(),

@@ -1,6 +1,8 @@
 import * as THREE from 'three';
-import { PALETTE, ATMOSPHERE, SCALE } from '../art/direction.js';
+import { PALETTE, ATMOSPHERE, SCALE, BIOME_FOLLOW, biomeAt } from '../art/direction.js';
 import { WATER_Y } from '../world/river.js';
+import { setTerrainAtmosphere } from '../world/terrainMaterial.js';
+import { lerp } from '../core/math.js';
 
 /**
  * One sun, one ambient, one coloured fog. That is the whole rig.
@@ -10,6 +12,10 @@ import { WATER_Y } from '../world/river.js';
  * shadow we delete. So: a directional key at PALETTE.sunDirection casting real
  * shadows, a hemisphere for the sky/ground bounce, and warm fog so distance
  * shifts hue instead of draining to grey.
+ *
+ * The rig's colours are not fixed: every frame they ease toward biomeAt(playerZ)
+ * (see `update`). The sun's *direction* is — the shadow box's texel-snapping
+ * basis and the terrain's baked sun-facing paint both assume it never moves.
  *
  * GRADE (exposure, saturation, contrast) belongs to main.js. This module only
  * touches renderer.shadowMap, which is a property of the light rig, not a grade.
@@ -107,6 +113,13 @@ export function setupLighting(scene, renderer) {
   const focus = new THREE.Vector3();
   const anchor = new THREE.Vector3();
 
+  const fog = scene.fog;
+  const background = scene.background;
+  // The terrain's aerial haze has no light object to live on; it is damped here
+  // alongside the fog it sits on top of, and pushed to the terrain material.
+  let haze = ATMOSPHERE.hazeStrength;
+  let lastZ = NaN;
+
   /**
    * The player travels thousands of units forward, so the shadow box has to
    * travel with them; a fixed world-space one is empty within seconds.
@@ -116,11 +129,50 @@ export function setupLighting(scene, renderer) {
    * which reads as the whole landscape shimmering — far more distracting than
    * the aliasing the resolution would otherwise cause.
    *
-   * `dt` is accepted but unused: the sun is fixed by art direction, and nothing
-   * here has state to integrate. It stays in the signature so this can start
-   * animating without every caller changing.
+   * The rig's colours, intensities and fog range ease toward biomeAt(playerZ)
+   * with the same frame-rate-independent damping the camera uses. `dt` only
+   * matters for that easing; the sun's direction is fixed by art direction. The
+   * band itself is already 400 units of smoothstep, so the easing is not doing
+   * the blend — it is there so a respawn does not cut and a hitch does not
+   * step. A jump longer than a frame of flight can cover is a respawn, and
+   * snaps: easing across a teleport would play a two-second time-lapse.
+   *
+   * Inside a pure biome the targets equal the current values exactly, so the
+   * lerps are no-ops to the bit and sectors 1–2 render as they always did.
    */
   function update(dt, playerZ, playerX = 0) {
+    const b = biomeAt(playerZ);
+    // `!(<= teleport)` rather than `>` so the NaN of the first call snaps too.
+    const snap = !(Math.abs(playerZ - lastZ) <= BIOME_FOLLOW.teleport);
+    lastZ = playerZ;
+
+    if (snap) {
+      sun.color.copy(b.sunColor);
+      sun.intensity = b.sunIntensity;
+      ambient.color.copy(b.ambientSky);
+      ambient.groundColor.copy(b.ambientGround);
+      ambient.intensity = b.ambientIntensity;
+      fog.color.copy(b.fogColor);
+      fog.near = b.fogNear;
+      fog.far = b.fogFar;
+      haze = b.hazeStrength;
+    } else {
+      // damp() from core/math, with the coefficient hoisted so the Colors can
+      // share it: lerp(cur, target, 1 - e^(-rate·dt)).
+      const k = 1 - Math.exp(-BIOME_FOLLOW.rate * dt);
+      sun.color.lerp(b.sunColor, k);
+      sun.intensity = lerp(sun.intensity, b.sunIntensity, k);
+      ambient.color.lerp(b.ambientSky, k);
+      ambient.groundColor.lerp(b.ambientGround, k);
+      ambient.intensity = lerp(ambient.intensity, b.ambientIntensity, k);
+      fog.color.lerp(b.fogColor, k);
+      fog.near = lerp(fog.near, b.fogNear, k);
+      fog.far = lerp(fog.far, b.fogFar, k);
+      haze = lerp(haze, b.hazeStrength, k);
+    }
+    background.copy(fog.color);
+    setTerrainAtmosphere(fog.color, fog.near, fog.far, haze, ambient.groundColor);
+
     focus.set(playerX, WATER_Y + SCALE.bankHeight * 0.4, playerZ + SHADOW_LEAD);
 
     const fx = Math.round(focus.dot(xAxis) / TEXEL) * TEXEL;

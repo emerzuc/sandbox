@@ -21,6 +21,7 @@ const WING_HALF = 5.2;
 const PLAYER_R = 3.2;
 
 const AVOID_RANGE = 150;
+const SHOT_CLEARANCE = 11; // hostile shot radius + plane radius + slack
 const FUEL_SEEK_BELOW = 92; // top up opportunistically, the way a human would
 const FUEL_SEEK_RANGE = 620;
 
@@ -51,6 +52,7 @@ export class Autopilot {
     this.game = game;
     this._lat = 0;
     this.lane = -1; // -1 = uncommitted
+    this._threat = new Float64Array(32);
   }
 
   update() {
@@ -119,6 +121,47 @@ export class Autopilot {
       const need = e.r + PLAYER_R + 4;
       if (Math.abs(dx) >= need) continue;
       bias -= Math.sign(dx || 1) * (need - Math.abs(dx)) * (1 - dz / AVOID_RANGE) * 1.6;
+    }
+
+    // Incoming fire. Project each hostile shot to where it will be when the
+    // plane reaches its z — a shell crossing the river laterally and a burst
+    // aimed at a predicted position are both straight lines, so this is exact —
+    // and step out of the way in proportion to how close it will pass. Any
+    // lateral movement defeats a lead-aimed shot, which is the whole point of
+    // the tell: this is what a human does when the turret comes round.
+    //
+    // Summing per-shot pushes fails on a burst: three shells spread across the
+    // lane push left, right and nowhere, and the sum flies straight into the
+    // middle one. So instead of pushing, *search*: try a handful of lateral
+    // positions and take the one that keeps the most distance from every shell
+    // that will meet us, with a slight preference for staying put.
+    let n = 0;
+    for (const s of this.game.shots) {
+      const dz = s.pos.z - p.pos.z;
+      if (dz < -40 || dz > 200) continue;
+      // Meet time from the relative z velocity, whatever its sign: a shell
+      // fired from abreast with forward lead is *slower* than the plane and
+      // gets overtaken — a bank-side gun's favourite kill — while a burst from
+      // ahead closes fast. Only a meeting in the near future matters.
+      const closing = p.speed - s.vel.z;
+      if (Math.abs(closing) < 4) continue;
+      const t = dz / closing;
+      if (t < 0 || t > 2.5) continue;
+      if (n < this._threat.length) this._threat[n++] = s.pos.x + s.vel.x * t;
+    }
+    if (n > 0) {
+      const base = target + bias;
+      let bestX = base;
+      let bestScore = -Infinity;
+      for (let k = -5; k <= 5; k++) {
+        const cand = base + k * 3.2;
+        if (cand < lane.lo + WING_HALF + 2 || cand > lane.hi - WING_HALF - 2) continue;
+        let gap = Infinity;
+        for (let i = 0; i < n; i++) gap = Math.min(gap, Math.abs(this._threat[i] - cand));
+        const score = Math.min(gap, SHOT_CLEARANCE * 1.5) - Math.abs(k) * 0.35;
+        if (score > bestScore) { bestScore = score; bestX = cand; }
+      }
+      bias = bestX - target;
     }
 
     // Never aim closer to a shore than the wingtips plus slack.

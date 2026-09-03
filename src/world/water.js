@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PALETTE, ATMOSPHERE, SCALE } from '../art/direction.js';
+import { PALETTE, ATMOSPHERE, SCALE, BIOME_FOLLOW, biomeAt } from '../art/direction.js';
 import {
   WATER_Y,
   RIVER_DEPTH,
@@ -173,7 +173,6 @@ const frag = () => /* glsl */ `
 #define FOAM_GAIN ${FOAM_GAIN.toFixed(3)}
 #define FLOW_SPEED ${FLOW_SPEED.toFixed(3)}
 #define REFL_DISTORT ${REFL_DISTORT.toFixed(4)}
-#define HAZE ${ATMOSPHERE.hazeStrength.toFixed(3)}
 
 uniform sampler2D tReflect;
 uniform sampler2D tField;
@@ -185,6 +184,7 @@ uniform vec3 uFoam;
 uniform vec3 uSpec;
 uniform vec3 uSunDir;
 uniform float uSunPower;
+uniform float uHaze;
 uniform float uTime;
 
 varying vec3 vWorld;
@@ -242,7 +242,7 @@ void main() {
   // The reflected ray crosses the same air the fog models, and at grazing angles
   // it crosses a lot of it. Haze the reflection before it is mixed in, or the
   // far water stays contrastier than the landscape it is reflecting.
-  refl = mix(refl, fogColor, HAZE * (1.0 - ndv));
+  refl = mix(refl, fogColor, uHaze * (1.0 - ndv));
   #endif
 
   // Only the last hand's-breadth of water lets the bed's colour through; past
@@ -325,6 +325,8 @@ export class Water {
     // Window of world rows currently resident in the ring buffer, [lo, hi).
     this._lo = 0;
     this._hi = 0;
+    // Player z at the last update, for the biome follow's respawn detection.
+    this._lastZ = NaN;
 
     this.target = new THREE.WebGLRenderTarget(1, 1, {
       minFilter: THREE.LinearFilter,
@@ -357,6 +359,7 @@ export class Water {
         uSpec: { value: new THREE.Color(PALETTE.waterSpecular) },
         uSunDir: { value: new THREE.Vector3(...PALETTE.sunDirection) },
         uSunPower: { value: PALETTE.sunIntensity },
+        uHaze: { value: ATMOSPHERE.hazeStrength },
         uTime: { value: 0 },
       },
       // The water and the bank meet exactly at y = WATER_Y. Bias the surface
@@ -515,8 +518,43 @@ export class Water {
     this.mesh.visible = true;
   }
 
+  /**
+   * The water's colours follow biomeAt(playerZ) with the same easing and the
+   * same respawn snap as the light rig, so the body of the river and the air
+   * over it are always in the same biome at the same moment. The fog uniforms
+   * are three's own (`fog: true`) and follow scene.fog, which the rig damps.
+   * Inside a pure biome every target equals the current value and the lerps
+   * are exact no-ops.
+   */
+  _followBiome(dt, playerZ) {
+    const b = biomeAt(playerZ);
+    const u = this.material.uniforms;
+    const snap = !(Math.abs(playerZ - this._lastZ) <= BIOME_FOLLOW.teleport);
+    this._lastZ = playerZ;
+
+    if (snap) {
+      u.uDeep.value.copy(b.waterDeep);
+      u.uShallow.value.copy(b.waterShallow);
+      u.uBed.value.copy(b.sand);
+      u.uFoam.value.copy(b.waterFoam);
+      u.uSpec.value.copy(b.waterSpecular);
+      u.uSunPower.value = b.sunIntensity;
+      u.uHaze.value = b.hazeStrength;
+      return;
+    }
+    const k = 1 - Math.exp(-BIOME_FOLLOW.rate * dt);
+    u.uDeep.value.lerp(b.waterDeep, k);
+    u.uShallow.value.lerp(b.waterShallow, k);
+    u.uBed.value.lerp(b.sand, k);
+    u.uFoam.value.lerp(b.waterFoam, k);
+    u.uSpec.value.lerp(b.waterSpecular, k);
+    u.uSunPower.value = lerp(u.uSunPower.value, b.sunIntensity, k);
+    u.uHaze.value = lerp(u.uHaze.value, b.hazeStrength, k);
+  }
+
   /** Called once per frame, before renderer.render. */
   update(dt, time, playerZ, camera) {
+    this._followBiome(dt, playerZ);
     this._syncField(playerZ);
     this.mesh.position.z = playerZ - BEHIND + 2 * DZ + PLANE_LEN / 2;
     this.material.uniforms.uTime.value = time;

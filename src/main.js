@@ -29,6 +29,9 @@ const useAutopilot = params.has('auto');
 const warpSeconds = parseFloat(params.get('warp') || '0');
 // Three engine sounds behind a switch, so the one with ears picks the winner.
 const engineVariant = params.get('engine') || 'a';
+// Harness only: the autopilot is a survivability probe, and a game over stops
+// the measurement. Every death is still reported; terrain deaths still fail.
+const startLives = Math.max(1, parseInt(params.get('lives') || '3', 10) || 3);
 
 // ------------------------------------------------------------------ renderer
 
@@ -59,13 +62,16 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 2200);
+// Layer 1 holds entities; the water's reflection camera deliberately does not
+// see it (see ENTITY_LAYER in game.js).
+camera.layers.enable(1);
 
 // ---------------------------------------------------------------------- game
 
 const audio = new Audio({ engine: engineVariant });
 const terrain = new Terrain(scene);
 const water = new Water(scene, renderer);
-const game = new Game(scene, audio);
+const game = new Game(scene, audio, { lives: startLives });
 const rig = new CameraRig(camera);
 const lighting = setupLighting(scene, renderer);
 
