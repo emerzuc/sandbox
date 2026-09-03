@@ -1,92 +1,95 @@
 # River Raid 3D — retrofit
 
-Retrofit em 3D do clássico do Atari 2600, em Three.js.
+Retrofit em 3D do clássico do Atari 2600, em Three.js. Direção de arte:
+**a arte da caixa de 1982, não os pixels** — vale dramático, sol rasante,
+avião minúsculo contra paisagem imensa. Ver `src/art/direction.js`.
 
-**Estado: fase 1 concluída — greybox jogável.** Sem uma textura, sem um asset.
-O objetivo desta fase é uma coisa só: descobrir se o jogo é bom *antes* de
-existir arte para escondê-lo.
+**Estado: fase 2 concluída — vertical slice jogável.** Água refletiva, terreno
+pintado por declive e altitude com sombras, pós-processamento, áudio
+inteiramente sintetizado, modelos e VFX. Gate verde.
 
 ```
 npm install
 npm run dev      # http://127.0.0.1:5173
-npm run shots    # harness de verificação (headless)
+npm run shots    # harness de verificação (headless, SwiftShader)
 ```
 
-Controles: `A`/`D` mover · `W`/`S` acelerar · `Espaço` atirar · `Enter` reiniciar.
+Controles: clique na tela · `A`/`D` mover · `W`/`S` acelerar · `Espaço` atirar
+· `Enter` reiniciar.
 
-## O que já existe
+## Arquitetura
 
-| Sistema | Estado |
+| Módulo | Papel |
 |---|---|
-| Simulação a 120 Hz com interpolação de render | ✅ |
-| Rio procedural infinito (meandro, largura variável, ilhas) | ✅ |
-| Terreno em chunks com streaming, 1 chunk/frame | ✅ |
-| Colisão exata contra a mesma função que gerou a malha | ✅ |
-| Voo, aceleração, roll, bob | ✅ |
-| Tiro, inimigos (navio, helicóptero, caça), destroços | ✅ |
-| Combustível como timer, postos de reabastecimento | ✅ |
-| Pontes como portão de setor + checkpoint | ✅ |
-| Câmera com mola, lag triplo, FOV kick, shake, hitstop | ✅ |
-| HUD, vidas, respawn, game over | ✅ |
-| Água, iluminação, pós-processamento, áudio | ⛔ fase 2 |
+| `world/river.js` | O mundo como função pura de `(x, z)`: meandro, largura, ilhas, SDF da margem, altura |
+| `world/terrain.js` | Chunks em streaming, 1 por frame; casters de sombra janelados |
+| `world/terrainMaterial.js` | Albedo por declive/altitude/margem, oclusão pré-calculada por vértice, bounce da parede iluminada |
+| `world/water.js` | Reflexão planar (half-res, far 760), refração por profundidade, flow map, espuma pela SDF |
+| `view/lighting.js` | Sol rasante com shadow box que segue o jogador e snap a texel; névoa colorida |
+| `view/post.js` | Bloom → grade (ACES, saturação, contraste, vinheta, motion blur por reprojeção) → SMAA → grain |
+| `view/shapes.js` | Modelos por loft e slab, um template por tipo, clonados |
+| `view/fx.js` | Explosões em três tempos, instanciadas, closed-form no vertex shader; congelam no hitstop |
+| `view/shaderGuards.js` | Guarda da normal flat-shaded contra `normalize(0)` |
+| `audio/` | Motor por RPM sem batimento, reverb do cânion por largura, mixagem que muda com combustível baixo |
+| `game/` | Sim a 120 Hz com interpolação, entidades, colisão contra a mesma função que gerou a malha |
+| `core/autopilot.js` | Piloto determinístico — é o harness, não feature |
 
-## Decisões que sustentam o resto do projeto
-
-**O mundo é uma função pura de `(x, z)`.** Nada é pré-gerado ou armazenado.
-Isso dá terreno infinito sem autoria, colisão exata — a física consulta
-exatamente a função que gerou a malha, então não existe deriva entre o que se
-vê e o que mata — e determinismo.
-
-**Nada de `Math.random()` na simulação.** Toda aleatoriedade vem de hashes
-semeados por índice de chunk. A mesma seed produz o mesmo rio, os mesmos
-inimigos e a mesma partida — inclusive o mesmo ruído do screen shake.
-
-**Timestep fixo.** A simulação nunca vê dt variável, então o feel é idêntico a
-60 e a 144 Hz. A câmera, ao contrário, roda em tempo de frame com amortecimento
-exponencial, que é invariante à taxa.
+Decisões que sustentam o resto: mundo como função pura (colisão exata,
+determinismo, terreno infinito); zero `Math.random()` na simulação; timestep
+fixo com câmera em tempo de frame; **nenhuma cor literal fora de
+`direction.js`**.
 
 ## Verificação
 
-`npm run shots` sobe o build headless, pilota com o autopilot determinístico e
-captura estados fixos do mundo em `shots/`.
+`npm run shots` sobe o build headless, pilota com o autopilot e captura estados
+fixos em `shots/`. Reprova em:
 
-O autopilot **não é feature de jogo, é o harness**: piloto roteirizado ⇒ run
-reproduzível frame a frame ⇒ screenshot vira artefato diffável em vez de
-opinião. Ele também é uma asserção contínua de que o mundo é navegável.
+- erro de console **ou warning de GL** — o Chrome reporta draw call descartado
+  como warning;
+- **frame preto** (luma média do screenshot < 5);
+- **morte contra o terreno** — canal impossível é bug, não dificuldade;
+- draws > 220 ou triângulos > 800k — tetos derivados da decomposição por passe
+  medida em `tools/probe-cost.mjs`, documentada no próprio gate.
 
-Gates que reprovam o build:
+Morte para inimigo ou por tanque vazio é reportada, não reprova. Frame time é
+tendência: SwiftShader não diz nada sobre GPU real.
 
-- erro de console ou request falho;
-- **morte contra o terreno** — significa que o gerador produziu um canal por
-  onde ninguém passaria; é bug, não dificuldade;
-- draw calls > 150, triângulos > 400k.
+Ferramentas de investigação em `tools/`: `bisect.mjs` (trial por patch em
+runtime, luma de screenshot real), `probe-nan-object.mjs` (atribui NaN a um
+objeto), `probe-gl.mjs` e `probe-tick1.mjs` (atribuem erros de GL a programa
+e frame), `probe-cost.mjs` (custo por passe).
 
-Morte para inimigo ou por tanque vazio é reportada mas **não** reprova: isso é o
-bot jogando mal, não um defeito.
+## Bugs reais que o harness pegou
 
-Frame time é registrado apenas como tendência. O headless roda em SwiftShader
-(rasterização por software), então o número não diz nada sobre hardware real —
-um gate de fps de verdade precisa de GPU de verdade e é assunto da fase 4.
+Fase 1: ilhas estreitando os canais abaixo da envergadura; piloto mirando
+posição em vez de velocidade; overshoot da lei proporcional; escolha de canal
+tardia; economia de combustível quebrada; vales interiores inundados.
 
-## Bugs reais que o harness pegou nesta fase
+Fase 2:
 
-Registrados porque justificam o custo de ter construído o harness antes da arte:
+1. **Quadro preto intermitente.** `flatShading` deriva a normal por
+   `normalize(cross(dFdx, dFdy))`; da câmera espelhada da reflexão sobram
+   slivers sub-pixel com derivadas zero → NaN → half-float da reflexão → água
+   amostra → cinco mips de bloom espalham pelo frame. Guardado em
+   `shaderGuards.js`.
+2. **Primeiro frame lixo.** Shadow map nascido dentro de um render para target
+   custom sobe mal parametrizado; 31 draws falhavam. Um render de aquecimento
+   para o framebuffer padrão resolve.
+3. **Espuma como neon.** Calibrada contra a luz placeholder, saturava sob o sol
+   novo e cruzava o limiar de bloom.
+4. **Gate cego.** `renderer.info.autoReset` zerava as estatísticas a cada passe
+   fullscreen; o teto de draw calls lia ~1 e nunca reprovaria.
 
-1. Ilhas estreitavam os dois canais abaixo da envergadura do avião — trecho
-   literalmente impossível.
-2. O piloto mirava o centro da pista 70 unidades à frente, voando permanentemente
-   deslocado ~8 unidades do centro atual. Lookahead deve alimentar velocidade,
-   não posição.
-3. Lei de controle proporcional chegava ao alvo em velocidade máxima e passava
-   por ele em ~6 unidades — quase toda a folga de um canal apertado.
-4. A escolha de canal só acontecia quando a ilha já existia — isto é, quando o
-   avião já estava em cima dela.
-5. Passar por um posto rendia ~13 de combustível de 100. Economia quebrada.
-6. Vales no interior afundavam abaixo de `y = 0` e eram inundados pelo plano
-   d'água: lagos fantasma a um quilômetro do rio.
+## Como a fase 2 foi feita
+
+Seis agentes em paralelo, cada um dono de um conjunto disjunto de arquivos,
+todos lendo `direction.js` e nenhum tocando `main.js`, `terrain.js` ou
+`game.js`. Integração, gates e depuração ficaram com um único integrador.
+Depuração não paraleliza: os quatro bugs acima só existiam com os módulos
+juntos.
 
 ## Próximo
 
-Fase 2 é a vertical slice: 60 segundos do jogo em qualidade final — água,
-iluminação, pós-processamento, áudio e modelos de verdade. É o slice que se
-avalia; se ele for bom, o resto é produção, não descoberta.
+Fase 3: conteúdo — mais tipos de inimigo, curva de dificuldade por setor,
+biomas. Antes disso, uma passada de ouvido no áudio (o agente não pôde ouvir
+o que fez) e um gate de fps em GPU real.
