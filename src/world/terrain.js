@@ -13,6 +13,12 @@ const STEP_Z = 2;
 const AHEAD = 980;
 const BEHIND = 160;
 
+// Only chunks inside the shadow camera's box can contribute to the shadow map;
+// the rest are submitted for nothing. Must cover the box in view/lighting.js
+// (z from player-140 to player+620) with a chunk of slack on each side.
+const SHADOW_BEHIND = 280;
+const SHADOW_AHEAD = 760;
+
 const COLS = Math.floor((WORLD_HALF_W * 2) / STEP_X) + 1;
 const ROWS = Math.floor(CHUNK_LEN / STEP_Z) + 1;
 
@@ -91,7 +97,10 @@ export class Terrain {
         this.scene.remove(mesh);
         mesh.geometry.dispose();
         this.chunks.delete(ci);
+        continue;
       }
+      const z0 = ci * CHUNK_LEN;
+      mesh.castShadow = z0 + CHUNK_LEN > playerZ - SHADOW_BEHIND && z0 < playerZ + SHADOW_AHEAD;
     }
 
     return built;

@@ -68,6 +68,8 @@ const FOAM_W = SCALE.riverWidthTypical * 0.085;
  * knee and let the sun glitter be the only thing that blooms.
  */
 const FOAM_GAIN = 0.72;
+
+const REFLECT_FAR = 760;
 const FLOW_SPEED = SCALE.cruiseSpeed * 0.09;
 const REFL_DISTORT = 0.011;
 
@@ -452,10 +454,17 @@ export class Water {
     cam.position.copy(this._view);
     cam.up.set(0, 1, 0).applyMatrix4(this._rot).reflect(this._normal);
     cam.lookAt(this._target3);
+    cam.fov = camera.fov;
+    cam.aspect = camera.aspect;
     cam.near = camera.near;
-    cam.far = camera.far;
+    // The reflection stops well short of the main camera's far plane. Past
+    // ~700 units the mirrored landscape is already most of the way to fog, and
+    // the shader hazes the reflection further at the grazing angles where the
+    // far water is seen — so those chunks cost a full re-render and change
+    // nothing on screen. Frustum culling drops them for free.
+    cam.far = REFLECT_FAR;
     cam.updateMatrixWorld();
-    cam.projectionMatrix.copy(camera.projectionMatrix);
+    cam.updateProjectionMatrix();
 
     // Projective lookup: the shader multiplies the world position by this, so no
     // model matrix is folded in and the plane is free to slide with the player.

@@ -64,6 +64,12 @@ const water = new Water(scene, renderer);
 const game = new Game(scene, audio);
 const rig = new CameraRig(camera);
 const lighting = setupLighting(scene, renderer);
+
+// The water's reflection pass is a second full renderer.render() per frame,
+// and by default each render re-draws every shadow caster into the shadow map.
+// Shadows are light-space and camera-independent, so once per frame is enough:
+// flag it at the top of the frame, and whichever render runs first does it.
+renderer.shadowMap.autoUpdate = false;
 const post = new PostFX(renderer, scene, camera);
 const hud = new Hud();
 
@@ -75,6 +81,12 @@ const input = autopilot ?? keyboard;
 // idempotent and cheap after the first success, so the simplest correct hook is
 // every keydown.
 window.addEventListener('keydown', () => audio.resume());
+renderer.domElement.tabIndex = 0;
+renderer.domElement.addEventListener('pointerdown', () => {
+  renderer.domElement.focus();
+  audio.resume();
+});
+renderer.domElement.focus();
 
 terrain.prime(game.player.pos.z);
 
@@ -88,6 +100,20 @@ if (warpSeconds > 0) {
   }
   terrain.prime(game.player.pos.z);
 }
+
+/**
+ * Warm-up render, discarded. Measured, not guessed: on the very first frame the
+ * water's reflection pass is the first renderer.render() of the session, so it
+ * is also the first render of the shadow map — and a shadow map born inside a
+ * render to a custom target comes up with its depth texture mis-parameterised.
+ * Every draw that frame then fails with "texture format / sampler type
+ * mismatch" (31 of them), and the frame is garbage. Rendering once to the
+ * default framebuffer first, shadows included, makes the fault vanish; a
+ * warm-up with shadows disabled does not. It also front-loads every shader
+ * compile, so the first real frame does not hitch.
+ */
+renderer.shadowMap.needsUpdate = true;
+renderer.render(scene, camera);
 
 // ---------------------------------------------------------------------- loop
 
@@ -120,6 +146,7 @@ function frame(now) {
 
   terrain.update(game.player.pos.z, 1);
   lighting.update(frameDt, game.player.pos.z, game.player.pos.x);
+  renderer.shadowMap.needsUpdate = true;
   game.render(alpha);
 
   // Effects run on the sim clock, not wall time, so a hitstop freezes them with

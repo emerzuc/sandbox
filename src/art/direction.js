@@ -26,19 +26,19 @@
 export const PALETTE = {
   // --- Sky: the amber-to-turquoise gradient the box art is built on ---
   skyZenith: 0x2c6d8f,
-  skyHorizon: 0xe8a04a,
+  skyHorizon: 0xdca66c,
   skyMid: 0x7d9a8d,
 
   // --- Sun: low and raking, never overhead. Long shadows are the point. ---
   sunColor: 0xffd6a0,
-  sunIntensity: 3.2,
+  sunIntensity: 3.4,
   /** Normalised direction TO the sun. Low elevation, strongly side-on. */
   sunDirection: [-0.62, 0.28, 0.73],
 
   // --- Ambient: sky bounce above, warm ground bounce below ---
   ambientSky: 0x5f8fa8,
   ambientGround: 0x4a3527,
-  ambientIntensity: 0.55,
+  ambientIntensity: 0.46,
 
   // --- Water: near-mirror, its colour comes mostly from the sky it reflects ---
   waterDeep: 0x0e2733,
@@ -47,11 +47,11 @@ export const PALETTE = {
   waterSpecular: 0xfff0d2,
 
   // --- Terrain: warm sunlit rock, cool shadowed rock, dark cliff faces ---
-  rockLit: 0xc98b5a,
+  rockLit: 0xbb8a60,
   rockShadow: 0x54413c,
   rockCliff: 0x3b2f2c,
   rockHigh: 0xe0b98a,
-  sand: 0xd8b184,
+  sand: 0xccb292,
 
   // --- Entities ---
   planeBody: 0xdde3e6,
@@ -71,7 +71,7 @@ export const PALETTE = {
 
 /** Atmosphere. Coloured fog, not grey — distance should shift hue, not just fade. */
 export const ATMOSPHERE = {
-  fogColor: 0xb4926a,
+  fogColor: 0xab9a83,
   fogNear: 320,
   fogFar: 1180,
   /** Extra haze that accumulates toward the horizon, on top of linear fog. */

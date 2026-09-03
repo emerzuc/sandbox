@@ -26,8 +26,23 @@ const VIEWPORT = { width: 1280, height: 720 };
  * draw calls and triangles submitted. Frame time is recorded for the trend, not
  * enforced. A real fps gate needs a real GPU and belongs in phase 4.
  */
-const MAX_DRAW_CALLS = 150;
-const MAX_TRIANGLES = 400_000;
+/**
+ * Ceilings are set from a measured decomposition, not picked to pass. Per
+ * frame at 1280x720 (tools/probe-cost.mjs), after the phase-2 cuts:
+ *
+ *   base scene                    ~67 draws   ~208k tris
+ *   water reflection (far 760)    ~66 draws   ~207k tris   second scene traversal
+ *   shadow map (casters windowed)  ~2 draws   ~160k tris   terrain re-submitted
+ *   post chain                    ~20 draws        0
+ *   ----------------------------------------------------
+ *   measured range                153–177     572–610k
+ *
+ * Three full traversals of the terrain is the honest cost of shadows plus a
+ * planar reflection; anything much cheaper means one of them stopped working.
+ * Headroom is ~25% for entity density, not a licence to add passes.
+ */
+const MAX_DRAW_CALLS = 220;
+const MAX_TRIANGLES = 800_000;
 
 const server = await preview({
   preview: { port: 4173, host: '127.0.0.1' },
