@@ -1,0 +1,178 @@
+import { chromium } from 'playwright';
+import { preview } from 'vite';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { meanLuma } from './bisect.mjs';
+
+/**
+ * Phase 1 verification harness.
+ *
+ * Boots the built game headless, flies it with the deterministic autopilot,
+ * and captures a fixed set of world states. Because the sim is seeded and the
+ * pilot is scripted, the same commit always produces the same pixels — which
+ * is what turns "does it look right?" into a diffable artifact instead of an
+ * opinion.
+ *
+ * It also fails loudly on console errors and on a frame-time budget, so the
+ * two things that silently rot in a WebGL project cannot rot unnoticed.
+ */
+
+const WARPS = [2, 14, 30, 52, 78];
+const VIEWPORT = { width: 1280, height: 720 };
+
+/**
+ * Headless here means SwiftShader — software rasterisation — so wall-clock
+ * frame time says nothing about how this runs on real hardware. The gates that
+ * *are* hardware-independent are the ones that actually predict GPU cost:
+ * draw calls and triangles submitted. Frame time is recorded for the trend, not
+ * enforced. A real fps gate needs a real GPU and belongs in phase 4.
+ */
+/**
+ * Ceilings are set from a measured decomposition, not picked to pass. Per
+ * frame at 1280x720 (tools/probe-cost.mjs), after the phase-2 cuts:
+ *
+ *   base scene                    ~67 draws   ~208k tris
+ *   water reflection (far 760)    ~66 draws   ~207k tris   second scene traversal
+ *   shadow map (casters windowed)  ~2 draws   ~160k tris   terrain re-submitted
+ *   post chain                    ~20 draws        0
+ *   ----------------------------------------------------
+ *   measured range                153–177     572–610k
+ *
+ * Three full traversals of the terrain is the honest cost of shadows plus a
+ * planar reflection; anything much cheaper means one of them stopped working.
+ * Headroom is ~25% for entity density, not a licence to add passes.
+ */
+const MAX_DRAW_CALLS = 220;
+const MAX_TRIANGLES = 800_000;
+
+const server = await preview({
+  preview: { port: 4173, host: '127.0.0.1' },
+  logLevel: 'error',
+});
+const base = `http://127.0.0.1:4173`;
+
+await mkdir('shots', { recursive: true });
+
+const browser = await chromium.launch({
+  // The image ships a pinned Chromium; use it rather than letting Playwright
+  // try to fetch a matching build.
+  executablePath: process.env.CHROMIUM_PATH || '/opt/pw-browsers/chromium',
+  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+});
+
+const problems = [];
+const report = [];
+
+for (const warp of WARPS) {
+  const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: 1 });
+
+  const errors = [];
+  // A missing favicon is not a rendering bug; everything else is.
+  const ignorable = (t) => /favicon/i.test(t);
+  page.on('console', (m) => {
+    const text = m.text();
+    // Chrome reports a dropped draw call — a GL_INVALID_OPERATION, a shader
+    // that failed to link — as a *warning*. Gating on errors alone let a draw
+    // vanish silently every frame while the gate stayed green.
+    const glFault = /GL_INVALID|WebGL: INVALID|THREE\.WebGL(Program|Shader)|Shader Error/.test(text);
+    if (m.type() !== 'error' && !glFault) return;
+    if (ignorable(text) || ignorable(m.location()?.url || '')) return;
+    errors.push(text.replace(/\[\.WebGL-[^\]]+\]\s*/, '').slice(0, 140));
+  });
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('requestfailed', (r) => {
+    if (!ignorable(r.url())) errors.push(`request failed: ${r.url()}`);
+  });
+
+  await page.goto(`${base}/?auto&warp=${warp}&lives=9`, { waitUntil: 'load' });
+  await page.waitForFunction('window.__rr !== undefined', null, { timeout: 20000 });
+  // Let the render loop settle so the perf numbers are steady state.
+  await page.waitForTimeout(2500);
+
+  const state = await page.evaluate(() => {
+    const { game, renderer } = window.__rr;
+    return {
+      state: game.state,
+      lives: game.lives,
+      score: game.score,
+      fuel: Math.round(game.fuel),
+      z: Math.round(game.player.pos.z),
+      sector: game.sector,
+      ents: game.ents.length,
+      deaths: game.deaths,
+      draws: renderer.info.render.calls,
+      tris: renderer.info.render.triangles,
+    };
+  });
+
+  const shot = await page.screenshot();
+  await writeFile(`shots/t${String(warp).padStart(3, '0')}s.png`, shot);
+  // A frame that rendered nothing is the failure the whole harness exists to
+  // catch, and a screenshot of it looks exactly like a screenshot of a bug-free
+  // black scene. Measure it.
+  const luma = meanLuma(shot);
+
+  const frameMs = await page.evaluate(
+    () => new Promise((res) => {
+      const samples = [];
+      let prev = performance.now();
+      let n = 0;
+      const tick = () => {
+        const now = performance.now();
+        samples.push(now - prev);
+        prev = now;
+        if (++n < 90) requestAnimationFrame(tick);
+        else {
+          samples.sort((a, b) => a - b);
+          res({
+            median: samples[Math.floor(samples.length / 2)],
+            p95: samples[Math.floor(samples.length * 0.95)],
+          });
+        }
+      };
+      requestAnimationFrame(tick);
+    })
+  );
+
+  if (errors.length) problems.push(`t=${warp}s console: ${[...new Set(errors)].slice(0, 3).join(' | ')}`);
+  if (luma < 5) problems.push(`t=${warp}s frame is black (luma ${luma})`);
+  // Mid-death with lives left is a 1.15 s transient the probe can land on;
+  // game over is the failure.
+  if (state.state !== 'playing' && !(state.state === 'dying' && state.lives > 0)) {
+    problems.push(`t=${warp}s autopilot not flying (state=${state.state}, lives=${state.lives})`);
+  }
+  // A terrain death is a world-generation bug: the river produced something no
+  // one could fly through. A death to an enemy or to an empty tank is just the
+  // bot playing badly, which is not a defect — report it, do not fail on it.
+  const terrainDeaths = state.deaths.filter((d) => d.cause === 'terrain');
+  if (terrainDeaths.length) {
+    problems.push(`t=${warp}s flew into terrain at z=${terrainDeaths.map((d) => d.z).join(', z=')} — unflyable channel`);
+  }
+  if (state.draws > MAX_DRAW_CALLS) problems.push(`t=${warp}s ${state.draws} draw calls > ${MAX_DRAW_CALLS}`);
+  if (state.tris > MAX_TRIANGLES) problems.push(`t=${warp}s ${state.tris} triangles > ${MAX_TRIANGLES}`);
+
+  report.push({ warp, luma, ...state, ...frameMs });
+  if (state.deaths.length) {
+    console.log('        deaths: ' + state.deaths.map((d) =>
+      `${d.cause}@z${d.z}` + (d.from ? ` [from ${d.from} vel ${d.vel} at x${d.at[0]}]` : '')).join(', '));
+  }
+  console.log(
+    `t=${String(warp).padStart(3)}s  z=${String(state.z).padStart(5)}  sector=${state.sector}  ` +
+    `score=${String(state.score).padStart(5)}  fuel=${String(state.fuel).padStart(3)}  ` +
+    `lives=${state.lives}  ents=${String(state.ents).padStart(3)}  ` +
+    `draws=${String(state.draws).padStart(3)}  tris=${(state.tris / 1000).toFixed(0)}k  ` +
+    `frame=${frameMs.median.toFixed(1)}/${frameMs.p95.toFixed(1)}ms  luma=${luma}`
+  );
+
+  await page.close();
+}
+
+await writeFile('shots/report.json', JSON.stringify(report, null, 2));
+await browser.close();
+await server.close();
+
+if (problems.length) {
+  console.error('\nGATE FAILED:');
+  for (const p of problems) console.error('  - ' + p);
+  process.exit(1);
+}
+console.log('\nall gates passed');
