@@ -9,7 +9,7 @@ import { shoreSDF, riverCenterX } from '../world/river.js';
 import { BULLET_GEO, MAT, makePlane } from '../view/shapes.js';
 import { FX } from '../view/fx.js';
 import { clamp, clamp01, damp, lerp } from '../core/math.js';
-import { PALETTE } from '../art/direction.js';
+import { PALETTE, biomeAt } from '../art/direction.js';
 import { WATER_Y } from '../world/river.js';
 
 const SPAWN_AHEAD = 1020;
@@ -145,6 +145,18 @@ export class Game {
   add(e) {
     e.mesh = makeEntityMesh(e.kind);
     e.mesh.traverse((o) => o.layers.set(ENTITY_LAYER));
+    // Scenery is painted with the terrain's palette, and the terrain's palette
+    // travels: a rock spawned in the basalt gorge must be basalt. Rocks are
+    // rare enough that a cloned material each is cheaper than a uniform.
+    if (e.kind === 'rock') {
+      const b = biomeAt(e.pos.z);
+      e.mesh.traverse((o) => {
+        if (!o.isMesh) return;
+        const top = o.material === MAT.rockTop;
+        o.material = o.material.clone();
+        o.material.color.copy(top ? b.rockHigh : b.rockCliff);
+      });
+    }
     e.mesh.position.copy(e.pos);
     this.scene.add(e.mesh);
     this.ents.push(e);

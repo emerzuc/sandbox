@@ -9,6 +9,7 @@ import { CameraRig } from './view/rig.js';
 import { PostFX } from './view/post.js';
 import { Hud } from './view/hud.js';
 import { PositionMarker } from './view/marker.js';
+import { Sky } from './view/sky.js';
 import { MAX_ROLL } from './game/player.js';
 import { setupLighting } from './view/lighting.js';
 import { Audio } from './audio/audio.js';
@@ -28,7 +29,9 @@ const params = new URLSearchParams(location.search);
 const useAutopilot = params.has('auto');
 const warpSeconds = parseFloat(params.get('warp') || '0');
 // Three engine sounds behind a switch, so the one with ears picks the winner.
-const engineVariant = params.get('engine') || 'a';
+// Default is the variant the audio pass bet on — the engine that answers the
+// stick and never sits still — until a pair of ears overrules it.
+const engineVariant = params.get('engine') || 'c';
 // Harness only: the autopilot is a survivability probe, and a game over stops
 // the measurement. Every death is still reported; terrain deaths still fail.
 const startLives = Math.max(1, parseInt(params.get('lives') || '3', 10) || 3);
@@ -83,6 +86,7 @@ renderer.shadowMap.autoUpdate = false;
 const post = new PostFX(renderer, scene, camera);
 const hud = new Hud();
 const marker = new PositionMarker(scene);
+const sky = new Sky(scene);
 
 const keyboard = new Input(window);
 const autopilot = useAutopilot ? new Autopilot(game) : null;
@@ -124,6 +128,7 @@ if (warpSeconds > 0) {
  * compile, so the first real frame does not hitch.
  */
 renderer.shadowMap.needsUpdate = true;
+sky.update(camera, game.player.pos.z);
 renderer.render(scene, camera);
 
 // ---------------------------------------------------------------------- loop
@@ -169,7 +174,9 @@ function frame(now) {
   // The water needs the camera's final pose for the frame: it renders its own
   // mirrored view before the main pass.
   rig.update(frameDt, game);
+  sky.update(camera, game.player.pos.z);
   water.update(frameDt, game.time, game.player.pos.z, camera);
+  post.blurScale = 1 - 0.85 * game.shake;
 
   audio.update(frameDt, {
     speed01: game.player.speed01,

@@ -23,6 +23,10 @@ export class Hud {
     this.sub = $('c-sub');
     this.perf = $('perf');
     this.pulse = $('pulse');
+    this.banner = $('banner');
+    this._sector = 1;
+    this.bannerT = 0;
+    this._score = 0;
     this.edgeL = $('edgeL');
     this.edgeR = $('edgeR');
 
@@ -32,7 +36,26 @@ export class Hud {
   }
 
   update(game, dt, input, perf) {
-    this.score.textContent = String(game.score).padStart(5, '0');
+    if (game.score !== this._score) {
+      this._score = game.score;
+      this.score.textContent = String(game.score).padStart(5, '0');
+      // Restart the animation even if the previous one has not finished.
+      this.score.classList.remove('pop');
+      void this.score.offsetWidth;
+      this.score.classList.add('pop');
+    }
+
+    // Sector banner: the bridge falling is the beat, the banner is its name.
+    if (game.sector !== this._sector) {
+      const advanced = game.sector > this._sector;
+      this._sector = game.sector;
+      if (advanced && game.state === 'playing') {
+        this.banner.textContent = `SETOR ${game.sector}`;
+        this.bannerT = 2.4;
+      }
+    }
+    this.bannerT = Math.max(0, this.bannerT - dt);
+    this.banner.style.opacity = Math.min(1, this.bannerT * 2.5, (2.4 - this.bannerT) * 4).toFixed(3);
     this.lives.textContent = String(Math.max(0, game.lives));
     this.sector.textContent = String(game.sector);
 

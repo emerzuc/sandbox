@@ -62,6 +62,14 @@
   .bar.leak > i { animation: leak .32s steps(2, end) infinite; }
   @keyframes leak { 50% { opacity: .35; } }
 
+  #banner {
+    position: absolute; left: 0; right: 0; top: 24%; text-align: center;
+    font-size: 30px; font-weight: 600; letter-spacing: .34em; opacity: 0;
+    will-change: opacity;
+  }
+  .value.pop { animation: pop .2s ease-out; }
+  @keyframes pop { from { transform: scale(1.22); } to { transform: scale(1); } }
+
   #perf {
     position: absolute; right: 0; bottom: 0; padding: 10px 14px;
     font-size: 11px; opacity: .4; text-align: right; white-space: pre;
@@ -85,6 +93,7 @@
   </div>
 
   <div id="crosshair"></div>
+  <div id="banner"></div>
 
   <div class="panel" id="bottom">
     <div>

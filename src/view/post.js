@@ -406,6 +406,14 @@ export class PostFX {
   }
 
   /** Replaces renderer.render(scene, camera) in the frame loop. */
+  /**
+   * External multiplier on the motion blur, 0..1. Camera shake reprojects into
+   * a huge velocity everywhere, so at full trauma the death frame became one
+   * smear — dramatic for a frame, "broken" for the second it lasts. The frame
+   * loop drives this down with the shake amount.
+   */
+  blurScale = 1;
+
   render(dt, time) {
     const camera = this.camera;
     const step = clamp(dt, MIN_DT, MAX_DT);
@@ -422,7 +430,7 @@ export class PostFX {
     u.uExposure.value = this.renderer.toneMappingExposure;
 
     this.grade.blur = this._hasHistory
-      ? POST.motionBlurStrength / (SHUTTER_HZ * step)
+      ? (POST.motionBlurStrength * this.blurScale) / (SHUTTER_HZ * step)
       : 0;
 
     // Bloom keys off post-exposure luminance so bloomThreshold reads as "how
