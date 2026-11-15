@@ -12,7 +12,8 @@ de dificuldade por setor, três biomas com domo de céu, recorde persistente.
 Jogável em teclado, toque e gamepad, com tela de início, pausa e mudo.
 Segundo playtest aplicado: tiro em diagonal, casamatas na beira d'água,
 postos F-U-E-L de quatro letras, curva de dificuldade pela metade.
-Três gates verdes.
+Terceiro: setores alternam rio aberto e canal duplo longo e reto, como no
+original. Três gates verdes.
 
 ```
 npm install
@@ -42,7 +43,7 @@ Nada se move até o primeiro input; perder o foco pausa. Parâmetros de URL:
 
 | Módulo | Papel |
 |---|---|
-| `world/river.js` | O mundo como função pura de `(x, z)`: meandro, largura, ilhas, SDF da margem, altura |
+| `world/river.js` | O mundo como função pura de `(x, z)`: meandro, largura, SDF da margem, altura. Setores ímpares são rio aberto; os pares têm um **canal duplo** de 510 unidades em que o rio para de serpentear e de variar de largura — dois braços retos, paralelos, de largura constante (≥ 28) |
 | `world/terrain.js` | Chunks em streaming, 1 por frame; casters de sombra janelados |
 | `world/terrainMaterial.js` | Albedo por declive/altitude/margem, oclusão pré-calculada por vértice, bounce da parede iluminada |
 | `world/water.js` | Reflexão planar (half-res, far 760), refração por profundidade, flow map, espuma pela SDF |
@@ -178,6 +179,22 @@ Segundo playtest ("navios dentro das montanhas", "helicóptero na cara",
     abaixo do retorno antecipado de invulnerável.
 18. **Zona livre do posto só valia no próprio chunk.** A posição do posto virou
     função pura do índice, para os chunks vizinhos também respeitarem.
+
+Terceiro playtest ("canal estreito e curvo em dupla, fica bem difícil"):
+
+19. **Ilha curta em rio que serpenteia.** As ilhas eram manchas de 230
+    unidades largadas num rio que continuava fazendo curva por baixo: canal
+    estreito *e* curvo. Viraram trechos: 510 unidades com o meandro e a
+    largura travados, um por setor par.
+20. **Sorteio de setor distribui mal.** Uma moeda por setor deu quatro canais
+    duplos seguidos e nenhum trecho aberto para casamata até o setor 8.
+    Alternância fixa: aberto, duplo, aberto, duplo.
+21. **Dois inimigos no mesmo braço.** Um por braço por chunk, braços
+    alternados entre chunks, longe das pontas do chunk; balão não divide braço
+    com vizinho. Menor distância medida entre dois no mesmo braço: 88.
+22. **Tiro inimigo atravessando o morro.** Com uma faixa de terra no meio do
+    rio, um helicóptero num braço alcançava quem estava no outro. Tiros
+    inimigos param no terreno, como os do jogador.
 
 ## Como a fase 2 foi feita
 

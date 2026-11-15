@@ -31,79 +31,144 @@ const MEANDER_AMP = 46;
 const HALF_W_MIN = 21;
 const HALF_W_MAX = 38;
 
-const ISLAND_BAND = 460;
-// An island occupies this slice of its band.
-const ISLAND_START = 0.18;
-const ISLAND_SPAN = 0.5;
-
 // Bridges stand every GATE_SPACING units (BRIDGE_SPACING in game/entities.js
-// mirrors this), and z = 0 is a gate too: the start line. Planes are set down
-// just past a gate, so the water there stays open — a little before it, so no
-// island runs under a bridge, and a good stretch after.
+// mirrors this), and z = 0 is a gate too: the start line. A sector is the
+// water between two gates.
 export const GATE_SPACING = 1000;
-const GATE_CLEAR_BEFORE = 80;
-const GATE_CLEAR_AFTER = 260;
-const ISLAND_FRAC = 0.3;
 
-/** Lateral position of the river's centreline at distance z. */
-export function riverCenterX(z) {
+/**
+ * DOUBLE CHANNELS
+ *
+ * The original River Raid is built out of long, straight, parallel channels:
+ * the river forks around a strip of land, the two arms run side by side for a
+ * good while, and they rejoin. The first islands here were the opposite —
+ * short, dropped into a river that kept meandering underneath them — and the
+ * playtest named the result exactly: a channel that is narrow *and* curved.
+ *
+ * So an island is now a stretch, not a blob. A sector either has one long
+ * double channel or none. For as long as it lasts the river stops wandering
+ * (the centreline is pulled to where it stands mid-stretch) and stops
+ * breathing (the width is held), so both arms are straight, parallel and of
+ * constant width, the way the 2600 drew them. The meander and the width ease
+ * in and out over a ramp either side, so the river bends *into* the stretch
+ * and is straight *through* it.
+ *
+ * A stretch sits wholly inside its sector, clear of both gates: no island
+ * under a bridge, and none where a plane is set down.
+ *
+ * Sectors alternate: odd ones (1, 3, 5…) are open river, even ones have a
+ * double channel. A coin per sector was tried first and gave four doubles in
+ * a row, with no open reach for a shore battery until sector 8. Alternating
+ * gives each sector a character instead — open water with guns on the banks,
+ * then twin channels with ships in them — which is how the original paces
+ * itself.
+ */
+// Far enough past the gate that a plane set down there has three clear seconds
+// at cruise before the prow.
+const DOUBLE_FROM = 340;
+const DOUBLE_TO = 850;
+const DOUBLE_RAMP = 140;
+/** How much of the meander is taken out. Not all of it: dead straight reads as built. */
+const STRAIGHTEN = 0.88;
+/** Open water either arm is carved from; wider than the river's own minimum. */
+const DOUBLE_HALF_W_MIN = 34;
+/**
+ * Floor under the narrower arm. The plane is 13 across; at 24 an arm was under
+ * two plane-widths and read as a slot from the cockpit. The original's arms
+ * are nearer three.
+ */
+const ARM_MIN = 28;
+/** The strip of land, as a fraction of the base half-width. */
+const ISLAND_FRAC = 0.42;
+/** A steep prow reads as a rock face from far off; the tail tapers away. */
+const PROW_LEN = 30;
+const TAIL_LEN = 90;
+
+function meander(z) {
   return (fbm1(z * 0.0016, WORLD_SEED, 3) - 0.5) * 2 * MEANDER_AMP;
 }
 
-/** Width of open water before an island is carved out of it. */
-function baseHalfWidth(z) {
+function wanderingHalfWidth(z) {
   const n = fbm1(z * 0.0031 + 100, WORLD_SEED ^ 77, 3);
   return lerp(HALF_W_MIN, HALF_W_MAX, clamp01((n - 0.2) / 0.6));
 }
 
+// Memo only: a stretch is a pure function of its sector index, and this is
+// asked for on every vertex of every terrain chunk.
+const stretches = new Map();
+
+/** The double channel of sector k (0-based), or null. */
+function stretchOf(k) {
+  let s = stretches.get(k);
+  if (s !== undefined) return s;
+  s = null;
+  if (k >= 1 && k % 2 === 1) {
+    const from = k * GATE_SPACING + DOUBLE_FROM;
+    const to = k * GATE_SPACING + DOUBLE_TO;
+    const mid = (from + to) / 2;
+    const base = Math.max(wanderingHalfWidth(mid), DOUBLE_HALF_W_MIN);
+    const dir = hash1(k, WORLD_SEED ^ 4242) < 0.5 ? -1 : 1;
+    s = {
+      from,
+      to,
+      cx: meander(mid),
+      base,
+      // Off-centre, so one arm is the roomier line — but never by enough to
+      // starve the other below ARM_MIN.
+      off: dir * Math.min(base * 0.18, Math.max(0, base - ARM_MIN)),
+      hw: base * ISLAND_FRAC,
+    };
+  }
+  stretches.set(k, s);
+  return s;
+}
+
+/** Public view of a sector's double channel: { from, to } in world z, or null. */
+export function doubleChannel(sectorIndex) {
+  const s = stretchOf(sectorIndex);
+  return s ? { from: s.from, to: s.to } : null;
+}
+
+/** 0 outside the stretch and its ramps, 1 inside it. */
+function hold(z, s) {
+  if (z <= s.from - DOUBLE_RAMP || z >= s.to + DOUBLE_RAMP) return 0;
+  if (z < s.from) return smoothstep((z - (s.from - DOUBLE_RAMP)) / DOUBLE_RAMP);
+  if (z > s.to) return smoothstep((s.to + DOUBLE_RAMP - z) / DOUBLE_RAMP);
+  return 1;
+}
+
+/** Lateral position of the river's centreline at distance z. */
+export function riverCenterX(z) {
+  const m = meander(z);
+  const s = stretchOf(Math.floor(z / GATE_SPACING));
+  if (!s) return m;
+  const w = hold(z, s);
+  return w > 0 ? m + (s.cx - m) * w * STRAIGHTEN : m;
+}
+
+/** Width of open water before an island is carved out of it. */
+function baseHalfWidth(z) {
+  const b = wanderingHalfWidth(z);
+  const s = stretchOf(Math.floor(z / GATE_SPACING));
+  if (!s) return b;
+  const w = hold(z, s);
+  return w > 0 ? b + (s.base - b) * w : b;
+}
+
 /**
- * Islands split the channel in two and force a commit. They appear in bands so
- * the player gets a rhythm of open water / choice / open water rather than
- * uniform noise.
+ * The strip of land at z: { amt, off, hw }, amt 0 where there is none.
  *
- * The island *displaces* water rather than blocking it: riverHalfWidth grows by
- * exactly the island's width, which makes each resulting channel `base ± off`
- * wide, independent of how fat the island is. Clamping `off` therefore puts a
- * hard floor under the narrower channel — an island can never produce a gap the
- * plane cannot fit through.
+ * The island *displaces* water rather than blocking it: riverHalfWidth grows
+ * by exactly the island's width, which makes each arm `base ± off` wide,
+ * independent of how fat the island is. Clamping `off` therefore puts a hard
+ * floor under the narrower arm.
  */
 export function islandAt(z) {
-  const band = Math.floor(z / ISLAND_BAND);
-  if (hash1(band, WORLD_SEED ^ 9001) < 0.45) return ISLAND_NONE;
-
-  // No island where a plane is put down. The plane starts — and respawns
-  // after every bridge — on the river's centreline, and an island always
-  // covers the centreline: the very first band used to put a rock face a
-  // hundred units ahead of a player who had not touched a key yet, and a
-  // respawn inside an island band was a respawn on land. The whole island is
-  // dropped rather than trimmed, so its prow stays where its prow rock is.
-  const from = band * ISLAND_BAND + ISLAND_START * ISLAND_BAND;
-  const to = from + ISLAND_SPAN * ISLAND_BAND;
-  const gate = Math.round((from + to) / 2 / GATE_SPACING) * GATE_SPACING;
-  if (to > gate - GATE_CLEAR_BEFORE && from < gate + GATE_CLEAR_AFTER) return ISLAND_NONE;
-
-  const local = (z - band * ISLAND_BAND) / ISLAND_BAND;
-  const t = clamp01((local - ISLAND_START) / ISLAND_SPAN);
-  if (t <= 0 || t >= 1) return ISLAND_NONE;
-
-  // A steep prow and a long tail. The old sine envelope grew the island from
-  // nothing over a hundred units, which from the cockpit is an ambiguous
-  // sliver — is that the island or the bank? — until it is too late to pick a
-  // side. A head that reaches full width in ~25 units reads as a rock face
-  // from far away, and the choice is visible before it is forced.
-  const head = smoothstep(clamp01(t / 0.1));
-  const tail = 1 - smoothstep(clamp01((t - 0.72) / 0.28));
-  const amt = head * tail;
-  const base = baseHalfWidth(z);
-  const dir = hash1(band, WORLD_SEED ^ 4242) < 0.5 ? -1 : 1;
-
-  return {
-    amt,
-    // Bias the island off-centre so one channel is the obvious line — but never
-    // far enough to starve the other one below HALF_W_MIN.
-    off: dir * Math.min(base * 0.25, Math.max(0, base - HALF_W_MIN)),
-    hw: base * ISLAND_FRAC,
-  };
+  const s = stretchOf(Math.floor(z / GATE_SPACING));
+  if (!s || z <= s.from || z >= s.to) return ISLAND_NONE;
+  const head = smoothstep(clamp01((z - s.from) / PROW_LEN));
+  const tail = 1 - smoothstep(clamp01((z - (s.to - TAIL_LEN)) / TAIL_LEN));
+  return { amt: head * tail, off: s.off, hw: s.hw };
 }
 
 const ISLAND_NONE = { amt: 0, off: 0, hw: 0 };
@@ -161,7 +226,7 @@ export function terrainHeight(x, z) {
  * Random x inside the channel at z, avoiding the island and keeping `margin`
  * clear of both shores. Returns null when the gap is too tight to place in.
  */
-export function pickChannelX(z, rnd, margin = 5) {
+export function pickChannelX(z, rnd, margin = 5, arm = -1) {
   const cx = riverCenterX(z);
   const hw = riverHalfWidth(z);
   const isl = islandAt(z);
@@ -177,7 +242,10 @@ export function pickChannelX(z, rnd, margin = 5) {
   const icx = cx + isl.off;
   const leftSpan = icx - ihw - (cx - hw);
   const rightSpan = cx + hw - (icx + ihw);
-  const useLeft = rnd() < (leftSpan > rightSpan ? 0.65 : 0.35);
+  // `arm` 0 or 1 names the side outright (low-x arm is 0). The die is rolled
+  // regardless, so asking for a side does not shift the caller's stream.
+  const roll = rnd();
+  const useLeft = arm >= 0 ? arm === 0 : roll < (leftSpan > rightSpan ? 0.65 : 0.35);
   const lo = useLeft ? cx - hw : icx + ihw;
   const hi = useLeft ? icx - ihw : cx + hw;
   if (hi - lo <= margin * 2) return null;

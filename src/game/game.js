@@ -6,7 +6,7 @@ import {
   FUEL_SEGS, FUEL_SEG_LEN, FUEL_HALF_W, FUEL_HALF_LEN,
 } from './entities.js';
 import { CHUNK_LEN } from '../world/terrain.js';
-import { shoreSDF, riverCenterX } from '../world/river.js';
+import { shoreSDF, riverCenterX, terrainHeight } from '../world/river.js';
 import { BULLET_GEO, MAT, makePlane } from '../view/shapes.js';
 import { FX } from '../view/fx.js';
 import { clamp, clamp01, damp, lerp } from '../core/math.js';
@@ -304,7 +304,10 @@ export class Game {
       s.pos.addScaledVector(s.vel, dt);
       s.life -= dt;
       const gone = s.life <= 0 || s.pos.z < pz - 60 || s.pos.z > pz + SPAWN_AHEAD;
-      if (s.pos.y <= WATER_Y + 0.2) {
+      // Hostile fire obeys the land too. With long strips of it down the
+      // middle of the river, a gun in one arm must not reach a plane in the
+      // other through the hill between them.
+      if (s.pos.y <= WATER_Y + 0.2 || terrainHeight(s.pos.x, s.pos.z) > s.pos.y) {
         this.fx.impact(s.pos);
         this.recycleShot(s);
         this.shots.splice(i, 1);

@@ -4,7 +4,7 @@ import { clamp, lerp, damp } from '../core/math.js';
 import { CHUNK_LEN } from '../world/terrain.js';
 import {
   riverCenterX, riverHalfWidth, pickChannelX, islandAt,
-  shoreSDF, WORLD_SEED, GATE_SPACING,
+  shoreSDF, WORLD_SEED, GATE_SPACING, doubleChannel,
 } from '../world/river.js';
 import { makeEntityMesh } from '../view/shapes.js';
 
@@ -118,10 +118,13 @@ function pickKind(weights, roll) {
   return WEIGHT_KINDS[0];
 }
 
-// Must match river.js: islands live in 460-unit bands and the head sits at
-// 18% into the band, reaching full width over the next 10% of it.
-const ISLAND_BAND = 460;
-const ISLAND_HEAD_AT = 0.18 + 0.1 * 0.5;
+// The prow rock stands this far past the start of a double channel, where the
+// strip of land has reached about half its width.
+const PROW_ROCK_AT = 15;
+// Inside a double channel hostiles keep to the middle of their chunk, so two
+// in the same arm from neighbouring chunks are never nose to tail — the
+// "narrow channel, and two of them in it" the playtest objected to.
+const ARM_Z_INSET = 0.2;
 
 // --- Tank ---
 // Turret slew rate. A plane passing abreast at 30 units sweeps ~2.7 rad/s, so
@@ -149,6 +152,24 @@ const TANK_MIN_RANGE = 55;
 
 // A ship is twelve units long and sails beam-on to the bank it is heading for.
 const SHIP_MARGIN = 8;
+// Aircraft keep this far from the banks of their own arm.
+const AIR_MARGIN = 5;
+
+// Written by armBounds(): the water an entity at (x, z) has to itself — the
+// whole river, or one arm of it when a strip of land runs down the middle.
+let _lo = 0, _hi = 0;
+function armBounds(x, z) {
+  const cx = riverCenterX(z);
+  const hw = riverHalfWidth(z);
+  _lo = cx - hw;
+  _hi = cx + hw;
+  const isl = islandAt(z);
+  if (isl.amt > 0) {
+    const icx = cx + isl.off;
+    const ihw = isl.hw * isl.amt;
+    if (x < icx) _hi = icx - ihw; else _lo = icx + ihw;
+  }
+}
 
 // --- Heli ---
 const HELI_TELL = 0.45;
@@ -176,6 +197,8 @@ const BALLOON_SWAY_Y = 0.5;
 // is invisible until it kills, the second turns refuelling into a collision.
 const BALLOON_BRIDGE_CLEAR = 40;
 const BALLOON_FUEL_CLEAR = 90;
+// A balloon closes an arm; with a hostile right beside it that is a pair.
+const BALLOON_HOSTILE_CLEAR = 70;
 
 // Scratch for muzzle flashes: fx.muzzle copies the coordinates, so one
 // module-level vector serves every gun in the game with no per-frame allocation.
@@ -271,12 +294,12 @@ export function spawnChunk(game, ci) {
   // --- Island prows: one tall rock at the head of every island, so the split
   // is announced from a distance instead of discovered underfoot. Scenery
   // only — the land it stands on is what kills. ---
-  for (let b = Math.floor(z0 / ISLAND_BAND); b * ISLAND_BAND < z1; b++) {
-    const hz = (b + ISLAND_HEAD_AT) * ISLAND_BAND;
-    if (hz < z0 || hz >= z1) continue;
-    const isl = islandAt(hz);
-    if (isl.amt <= 0) continue;
-    game.add(makeEntity('rock', riverCenterX(hz) + isl.off, SPEC.rock.y, hz));
+  const stretch = doubleChannel(Math.floor(z0 / BRIDGE_SPACING));
+  if (stretch) {
+    const hz = stretch.from + PROW_ROCK_AT;
+    if (hz >= z0 && hz < z1) {
+      game.add(makeEntity('rock', riverCenterX(hz) + islandAt(hz).off, SPEC.rock.y, hz));
+    }
   }
 
   // --- Hostiles: everything below reads the sector's row of the table. The
@@ -290,20 +313,30 @@ export function spawnChunk(game, ci) {
   rnd();
   const n = Math.floor(D.density * (ci + 1) + 0.5) - Math.floor(D.density * ci + 0.5);
 
+  const placed = [];
   for (let i = 0; i < n; i++) {
-    const z = z0 + rnd() * CHUNK_LEN;
-    const kind = pickKind(D.weights, rnd());
+    let z = z0 + rnd() * CHUNK_LEN;
+    let kind = pickKind(D.weights, rnd());
+    // In a double channel: one hostile per arm per chunk, alternating arms
+    // from chunk to chunk, and kept off the chunk's ends.
+    const split = islandAt(z).amt > 0;
+    if (split) z = z0 + CHUNK_LEN * (ARM_Z_INSET + (1 - 2 * ARM_Z_INSET) * ((z - z0) / CHUNK_LEN));
+    const arm = split ? (ci + i) & 1 : -1;
     // The dice are rolled either way, so clearing a stretch does not reshuffle
     // everything downstream of it.
     if (blocked(z)) continue;
 
     if (kind === 'tank') {
-      spawnTank(game, z, sector, D, rnd);
-      continue;
+      if (spawnTank(game, z, sector, D, rnd)) { placed.push(z); continue; }
+      // No room for a battery here (it does not stand beside a double
+      // channel). The slot is not wasted: something that flies or floats
+      // takes it, so the sector keeps the density its row asks for.
+      kind = pickKind([D.weights[0], D.weights[1], D.weights[2], 0], rnd());
     }
 
-    const x = pickChannelX(z, rnd, kind === 'ship' ? 8 : 5);
+    const x = pickChannelX(z, rnd, kind === 'ship' ? 8 : 5, arm);
     if (x === null) continue;
+    placed.push(z);
 
     const e = makeEntity(kind, x, SPEC[kind].y, z);
     if (kind === 'ship') e.vx = (rnd() < 0.5 ? -1 : 1) * lerp(7, 17, rnd());
@@ -323,7 +356,7 @@ export function spawnChunk(game, ci) {
   // --- Balloons: hung where the routing already matters — an island split or
   // a narrow gorge — so blocking one lane is a real choice, not a nuisance.
   // Open water gets them at a reduced rate. ---
-  spawnBalloon(game, z0, z1, D, rnd, blocked);
+  spawnBalloon(game, z0, z1, D, rnd, (z) => blocked(z) || placed.some((pz) => Math.abs(pz - z) < BALLOON_HOSTILE_CLEAR));
 }
 
 /**
@@ -383,13 +416,13 @@ function spawnTank(game, z, sector, D, rnd) {
     : (hash1(Math.floor(z / TANK_BAND), WORLD_SEED ^ 0x7a9) < 0.5 ? -1 : 1);
 
   for (let d = -TANK_ISLAND_CLEAR; d <= TANK_ISLAND_CLEAR; d += 20) {
-    if (islandAt(z + d).amt > 0) return;
+    if (islandAt(z + d).amt > 0) return false;
   }
   const x = riverCenterX(z) + side * (riverHalfWidth(z) + TANK_SETBACK);
   // By construction this is the outer shore, but the SDF is the one truth
   // about land here, so it gets the final say.
   const sd = shoreSDF(x, z);
-  if (sd < 2 || sd > 6) return;
+  if (sd < 2 || sd > 6) return false;
 
   const e = makeEntity('tank', x, SPEC.tank.y, z);
   e.side = side;
@@ -406,13 +439,15 @@ function spawnTank(game, z, sector, D, rnd) {
   // a chunk share a rhythm.
   e.cool = D.tankFire * lerp(0.15, 0.5, rnd());
   game.add(e);
+  return true;
 }
 
 function spawnBalloon(game, z0, z1, D, rnd, blocked) {
   // Find the tightest lane in the chunk: an island channel or a narrow gorge.
   let bestZ = z0 + CHUNK_LEN * 0.5;
   let bestW = Infinity;
-  for (let i = 0; i < 4; i++) {
+  const inSplit = islandAt(z0 + CHUNK_LEN * 0.5).amt > 0;
+  for (let i = inSplit ? 1 : 0; i < (inSplit ? 3 : 4); i++) {
     const z = z0 + ((i + 0.5) / 4) * CHUNK_LEN;
     const hw = riverHalfWidth(z);
     const isl = islandAt(z);
@@ -514,6 +549,8 @@ function stepHeli(e, dt, player, game) {
     e.phase += dt * 1.3;
     e.pos.x += Math.cos(e.phase) * e.vx * dt;
     e.pos.y = SPEC.heli.y + Math.sin(e.phase * 0.7) * 0.9;
+    armBounds(e.prevPos.x, e.pos.z);
+    e.pos.x = clamp(e.pos.x, _lo + AIR_MARGIN, Math.max(_lo + AIR_MARGIN, _hi - AIR_MARGIN));
   }
   e.pos.z -= 9 * dt;
   e.dip = damp(e.dip, telling ? 1 : 0, 10, dt);
@@ -564,18 +601,9 @@ export function stepEntity(e, dt, player, game) {
     case 'ship': {
       // Patrol the channel it was launched in. It used to turn at the outer
       // banks only, and so sailed straight through any island in between.
-      const cx = riverCenterX(e.pos.z);
-      const hw = riverHalfWidth(e.pos.z);
-      let lo = cx - hw;
-      let hi = cx + hw;
-      const isl = islandAt(e.pos.z);
-      if (isl.amt > 0) {
-        const icx = cx + isl.off;
-        const ihw = isl.hw * isl.amt;
-        if (e.pos.x < icx) hi = icx - ihw; else lo = icx + ihw;
-      }
-      lo += SHIP_MARGIN;
-      hi -= SHIP_MARGIN;
+      armBounds(e.pos.x, e.pos.z);
+      const lo = _lo + SHIP_MARGIN;
+      const hi = _hi - SHIP_MARGIN;
       if (hi <= lo) {
         // No room to patrol: hold station mid-channel.
         e.pos.x = (lo + hi) / 2;
@@ -594,8 +622,12 @@ export function stepEntity(e, dt, player, game) {
       break;
     case 'jet': {
       e.pos.z += e.vz * dt;
-      // Drifts toward the player's lane without ever fully locking on.
+      // Drifts toward the player's lane without ever fully locking on — but
+      // stays in its own arm of a double channel rather than cutting across
+      // the land between.
       e.pos.x += clamp(player.pos.x - e.pos.x, -12, 12) * dt * 0.8;
+      armBounds(e.prevPos.x, e.pos.z);
+      e.pos.x = clamp(e.pos.x, _lo + AIR_MARGIN, Math.max(_lo + AIR_MARGIN, _hi - AIR_MARGIN));
       break;
     }
     case 'tank':

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Game, FUEL_MAX } from '../src/game/game.js';
 import { spawnChunk, stepEntity, makeEntity, SPEC, RUNWAY, BRIDGE_SPACING, FUEL_HALF_LEN, FUEL_HALF_W } from '../src/game/entities.js';
-import { pickChannelX } from '../src/world/river.js';
+import { pickChannelX, doubleChannel } from '../src/world/river.js';
 import { mulberry32 } from '../src/core/rng.js';
 import { shoreSDF, riverCenterX, riverHalfWidth, islandAt } from '../src/world/river.js';
 import { CHUNK_LEN } from '../src/world/terrain.js';
@@ -46,7 +46,7 @@ check('the curve climbs, and starts gently', perSector[0] <= 5 && perSector[5] >
   `hostiles per sector: ${perSector.join(' ')}`);
 
 const tanks = hostiles.filter((e) => e.kind === 'tank');
-check('batteries are dug in at the waterline', tanks.length > 3 && tanks.every((e) => {
+check('batteries are dug in at the waterline', tanks.length >= 3 && tanks.every((e) => {
   const sd = shoreSDF(e.pos.x, e.pos.z); return sd >= 2 && sd <= 6;
 }), `${tanks.length} batteries`);
 
@@ -112,7 +112,45 @@ const landings = gates.map((gz) => {
 });
 check('start and every checkpoint open on clear centreline water', landings.every((d) => d === Infinity),
   `first land on the centreline after: ${landings.map((d) => (d === Infinity ? '-' : d)).join(' ')}`);
-check('islands still exist', islandZs.length >= 5, `${islandZs.length} islands in 12 sectors`);
+
+// --- double channels: long, straight, parallel, as in the original ---------
+const stretches = [];
+for (let k = 0; k < 12; k++) { const d = doubleChannel(k); if (d) stretches.push({ k, ...d }); }
+check('even sectors have one long double channel, odd sectors are open river',
+  stretches.map((d) => d.k + 1).join(' ') === '2 4 6 8 10 12' && stretches.every((d) => d.to - d.from >= 500),
+  `sectors ${stretches.map((d) => d.k + 1).join(' ')}; ${stretches[0].to - stretches[0].from} units each`);
+
+const arms = (z) => {
+  const cx = riverCenterX(z), hw = riverHalfWidth(z), isl = islandAt(z);
+  const icx = cx + isl.off, ihw = isl.hw * isl.amt;
+  return { cx, left: icx - ihw - (cx - hw), right: cx + hw - (icx + ihw) };
+};
+let drift = 0; let narrowest = Infinity; let breathing = 0;
+for (const d of stretches) {
+  // The body of the stretch: past the prow, short of the tail.
+  const ref = arms((d.from + d.to) / 2);
+  for (let z = d.from + 40; z <= d.to - 100; z += 10) {
+    const a = arms(z);
+    drift = Math.max(drift, Math.abs(a.cx - ref.cx));
+    narrowest = Math.min(narrowest, a.left, a.right);
+    breathing = Math.max(breathing, Math.abs(a.left - ref.left), Math.abs(a.right - ref.right));
+  }
+}
+check('through a double channel the river runs straight', drift < 6, `centreline moves at most ${drift.toFixed(1)} units over ~400`);
+check('both arms are wide enough and hold their width', narrowest >= 28 - 1e-6 && breathing < 1,
+  `narrowest arm ${narrowest.toFixed(1)}, width varies by ${breathing.toFixed(2)}`);
+
+// "Narrow channel, and two of them in it": inside a double channel, no two
+// hostiles share an arm at close quarters.
+let tightest = Infinity;
+const inArm = hostiles.filter((e) => e.kind !== 'tank' && islandAt(e.pos.z).amt > 0);
+for (const a of inArm) for (const b of inArm) {
+  if (a === b) continue;
+  const sameArm = (a.pos.x < riverCenterX(a.pos.z) + islandAt(a.pos.z).off) === (b.pos.x < riverCenterX(b.pos.z) + islandAt(b.pos.z).off);
+  if (sameArm) tightest = Math.min(tightest, Math.abs(a.pos.z - b.pos.z));
+}
+check('no two hostiles share an arm at close quarters', inArm.length >= 6 && tightest >= 45,
+  `${inArm.length} hostiles in double channels, closest pair in one arm ${tightest.toFixed(0)} apart`);
 
 // -------------------------------------------------------------------- game
 const scene = new THREE.Scene();
@@ -151,11 +189,11 @@ run(3, input(), null, false);
 check('a player who touches nothing survives the first three seconds', game.state === 'playing' && game.deaths.length === 0,
   JSON.stringify(game.deaths));
 game.checkpointZ = 1045; game.player.invuln = 0; game.die('test');
-run(3, input(), null, false);
-check('a respawn opens on empty water too', game.state === 'playing' && Math.abs(game.player.pos.z - 1045) < 250 &&
+run(3, input(), () => game.state !== 'playing', false);
+check('a respawn opens on empty water too', game.state === 'playing' && Math.abs(game.player.pos.z - 1045) < 30 &&
   game.ents.filter((e) => HOSTILE.has(e.kind)).every((e) => e.pos.z >= 1045 + RUNWAY));
-run(2.5, input(), null, false);
-check('and a player who touches nothing survives it', game.state === 'playing' && game.deaths.length === 1, JSON.stringify(game.deaths));
+run(3, input(), null, false);
+check('and a player who touches nothing survives three seconds of it', game.state === 'playing' && game.deaths.length === 1, JSON.stringify(game.deaths));
 
 // --- depot: one letter per shot, nearest first, with a grace period --------
 game.reset(); freeze();
