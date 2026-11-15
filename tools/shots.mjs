@@ -154,6 +154,16 @@ for (const warp of WARPS) {
   if (terrainDeaths.length) {
     problems.push(`t=${warp}s flew into terrain at z=${terrainDeaths.map((d) => d.z).join(', z=')} — unflyable channel`);
   }
+  // One death to an enemy is the bot playing badly. Three at the same spot is
+  // a spot nobody gets past — unfair by construction, and a bug.
+  const spots = new Map();
+  for (const d of state.deaths) {
+    const key = `${d.cause}@z${Math.round(d.z / 40) * 40}`;
+    spots.set(key, (spots.get(key) || 0) + 1);
+  }
+  for (const [key, n] of spots) {
+    if (n >= 3) problems.push(`t=${warp}s died ${n} times at the same spot (${key}) — unfair by construction`);
+  }
   if (state.draws > MAX_DRAW_CALLS) problems.push(`t=${warp}s ${state.draws} draw calls > ${MAX_DRAW_CALLS}`);
   if (state.tris > MAX_TRIANGLES) problems.push(`t=${warp}s ${state.tris} triangles > ${MAX_TRIANGLES}`);
 

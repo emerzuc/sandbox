@@ -56,7 +56,13 @@ await page.keyboard.press('KeyM');
 await page.keyboard.down('KeyD');
 check('first key starts the game', await until(`rr.mode === 'run' && g.time > 0.3`));
 check('D steers screen-right (world -X)', await until('g.player.vx < -5'), `vx=${(await rr('g.player.vx')).toFixed(1)}`);
+await page.keyboard.down('KeyX');
+check('X fires the angled shot, toward the side being steered', await until('g.bullets.some((b) => b.angled && b.vx < -60)'));
+await page.keyboard.up('KeyX');
 await page.keyboard.up('KeyD');
+await page.keyboard.down('KeyZ');
+check('Z fires straight', await until('g.bullets.some((b) => !b.angled && b.vx === 0)'));
+await page.keyboard.up('KeyZ');
 check('title card is gone in play', (await card()) === '');
 
 // --- pause ------------------------------------------------------------------

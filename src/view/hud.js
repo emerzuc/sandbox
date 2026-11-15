@@ -124,9 +124,9 @@ export class Hud {
         `ready-${touch}-${pad}`,
         'River Raid 3D',
         touch ? 'Toque para começar' : pad ? 'Aperte um botão para começar' : 'Aperte uma tecla ou clique para começar',
-        touch ? 'Arraste para pilotar · para cima acelera, para baixo freia · o tiro é automático'
-          : pad ? 'Analógico pilota · gatilhos aceleram e freiam · A atira · Start pausa'
-          : 'A/D pilotar · W/S acelerar e frear · Espaço atirar · P pausa · M som'
+        touch ? 'Arraste para pilotar · para cima acelera, para baixo freia · o tiro é automático e sai em diagonal nas curvas'
+          : pad ? 'Analógico pilota · gatilhos aceleram e freiam · A tiro reto · B tiro em diagonal · Start pausa'
+          : 'A/D pilotar · W/S acelerar e frear · Z tiro reto · X tiro em diagonal, na direção da curva · P pausa · M som'
       );
     } else if (mode === 'paused') {
       this.showCard(

@@ -150,15 +150,28 @@ export class Autopilot {
       if (n < this._threat.length) this._threat[n++] = s.pos.x + s.vel.x * t;
     }
     if (n > 0) {
+      // Candidates are steps from where the plane *is*, not from where it
+      // would like to be, and a candidate on the far side of a shell is
+      // worthless: getting there means flying through the spot the shell is
+      // headed for. An earlier version scored destinations only, and steered a
+      // plane that was sitting safely fifteen units clear straight across the
+      // river into the shot — three times running, which is what tripped the
+      // "died at the same spot" gate.
       const base = target + bias;
-      let bestX = base;
+      let bestX = p.pos.x;
       let bestScore = -Infinity;
-      for (let k = -5; k <= 5; k++) {
-        const cand = base + k * 3.2;
+      for (let k = -6; k <= 6; k++) {
+        const cand = p.pos.x + k * 3.2;
         if (cand < lane.lo + WING_HALF + 2 || cand > lane.hi - WING_HALF - 2) continue;
         let gap = Infinity;
-        for (let i = 0; i < n; i++) gap = Math.min(gap, Math.abs(this._threat[i] - cand));
-        const score = Math.min(gap, SHOT_CLEARANCE * 1.5) - Math.abs(k) * 0.35;
+        for (let i = 0; i < n; i++) {
+          const th = this._threat[i];
+          const crosses = (th - p.pos.x) * (th - cand) < 0;
+          gap = Math.min(gap, crosses ? 0 : Math.abs(th - cand));
+        }
+        // Clear of every shell first; then, among the clear ones, nearest to
+        // where the pilot wanted to be anyway.
+        const score = Math.min(gap, SHOT_CLEARANCE * 1.5) - Math.abs(cand - base) * 0.04 - Math.abs(k) * 0.08;
         if (score > bestScore) { bestScore = score; bestX = cand; }
       }
       bias = bestX - target;
@@ -182,6 +195,7 @@ export class Autopilot {
     const brake = Math.sqrt(2 * LAT_DECEL * 0.55 * Math.abs(err));
     const wantVx = Math.sign(err) * Math.min(LAT_MAX, brake) + feedForward;
 
+    this._target = target; // exposed for the harness's forensics
     // Flip to the input axis (see player.js).
     this._lat = -clamp(wantVx / LAT_MAX, -1, 1);
   }
@@ -189,6 +203,11 @@ export class Autopilot {
   get lateral() { return this._lat; }
   get throttle() { return 0; }
   get firing() { return true; }
+  get firingAlt() { return false; }
+  // The pilot's trigger is welded down, so it gets the same courtesy a thumb
+  // on glass does: the game holds fire when a depot is next down the barrel.
+  get autoFire() { return true; }
+  consumeFireAlt() { return false; }
   consumeFire() { return false; }
   consumeRestart() { return false; }
 }

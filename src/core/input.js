@@ -26,6 +26,7 @@ export class Input {
   constructor(target = window, surface = null) {
     this.keys = new Set();
     this.firedEdge = false;
+    this.firedAltEdge = false;
     this.restartEdge = false;
     this.startEdge = false;
     this.pauseEdge = false;
@@ -36,7 +37,7 @@ export class Input {
 
     // One floating stick: wherever the first finger lands is the centre.
     this.touch = { active: false, id: -1, x0: 0, y0: 0, x: 0, y: 0, lat: 0, thr: 0 };
-    this.pad = { lat: 0, thr: 0, fire: false, prev: 0 };
+    this.pad = { lat: 0, thr: 0, fire: false, alt: false, prev: 0 };
 
     target.addEventListener('keydown', (e) => {
       if (e.repeat) return;
@@ -45,7 +46,8 @@ export class Input {
       this.kind = 'keys';
       // Mute is a setting, not an intent to play: it must not start or resume.
       if (c !== 'KeyM') this.startEdge = true;
-      if (c === 'Space') this.firedEdge = true;
+      if (c === 'Space' || c === 'KeyZ') this.firedEdge = true;
+      if (c === 'KeyX') this.firedAltEdge = true;
       if (c === 'Enter' || c === 'KeyR') this.restartEdge = true;
       if (c === 'KeyP' || c === 'Escape') this.pauseEdge = true;
       if (c === 'KeyM') this.muteEdge = true;
@@ -123,7 +125,7 @@ export class Input {
     const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : null;
     let gp = null;
     if (pads) for (const g of pads) { if (g && g.connected) { gp = g; break; } }
-    if (!gp) { p.lat = 0; p.thr = 0; p.fire = false; p.prev = 0; return; }
+    if (!gp) { p.lat = 0; p.thr = 0; p.fire = false; p.alt = false; p.prev = 0; return; }
 
     const b = (i) => (gp.buttons[i] ? gp.buttons[i].value : 0);
     const ax = gp.axes[0] || 0;
@@ -135,7 +137,8 @@ export class Input {
     const trig = b(7) - b(6);
     const ay = -(gp.axes[1] || 0);
     p.thr = Math.abs(trig) > 0.25 ? Math.sign(trig) : ay > 0.6 || b(12) > 0.5 ? 1 : ay < -0.6 || b(13) > 0.5 ? -1 : 0;
-    p.fire = b(0) > 0.5 || b(2) > 0.5 || b(5) > 0.5;
+    p.fire = b(0) > 0.5 || b(5) > 0.5;
+    p.alt = b(1) > 0.5 || b(2) > 0.5 || b(4) > 0.5;
 
     // Rising edges, packed into a bitmask so no per-frame array is needed.
     let mask = 0;
@@ -145,6 +148,7 @@ export class Input {
     if (rose || p.lat || p.thr) this.kind = 'pad';
     if (rose) this.startEdge = true;
     if (rose & 1) { this.firedEdge = true; this.restartEdge = true; }
+    if (rose & 0b10110) this.firedAltEdge = true;
     if (rose & (1 << 9)) { this.pauseEdge = true; this.restartEdge = true; }
   }
 
@@ -168,7 +172,20 @@ export class Input {
 
   /** A thumb has no spare finger for a trigger: touching *is* firing. */
   get firing() {
-    return this.down('Space') || this.touch.active || this.pad.fire;
+    return this.down('Space', 'KeyZ') || this.touch.active || this.pad.fire;
+  }
+
+  /** The angled shot. On touch it rides along whenever the thumb is turning. */
+  get firingAlt() {
+    return this.down('KeyX') || this.pad.alt || (this.touch.active && Math.abs(this.touch.lat) > 0.35);
+  }
+
+  /**
+   * True when the trigger is not a decision — the thumb is down to steer and
+   * the gun fires because of it. The game uses this to spare fuel depots.
+   */
+  get autoFire() {
+    return this.touch.active && !this.down('Space', 'KeyZ') && !this.pad.fire;
   }
 
   #take(name) {
@@ -179,6 +196,7 @@ export class Input {
 
   /** True once per physical press. */
   consumeFire() { return this.#take('firedEdge'); }
+  consumeFireAlt() { return this.#take('firedAltEdge'); }
   consumeRestart() { return this.#take('restartEdge'); }
   consumeStart() { return this.#take('startEdge'); }
   consumePause() { return this.#take('pauseEdge'); }
@@ -186,6 +204,6 @@ export class Input {
 
   /** Drop everything latched — used when leaving the title card or a pause. */
   flush() {
-    this.firedEdge = this.restartEdge = this.startEdge = this.pauseEdge = false;
+    this.firedEdge = this.firedAltEdge = this.restartEdge = this.startEdge = this.pauseEdge = false;
   }
 }

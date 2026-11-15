@@ -32,6 +32,17 @@ const HALF_W_MIN = 21;
 const HALF_W_MAX = 38;
 
 const ISLAND_BAND = 460;
+// An island occupies this slice of its band.
+const ISLAND_START = 0.18;
+const ISLAND_SPAN = 0.5;
+
+// Bridges stand every GATE_SPACING units (BRIDGE_SPACING in game/entities.js
+// mirrors this), and z = 0 is a gate too: the start line. Planes are set down
+// just past a gate, so the water there stays open — a little before it, so no
+// island runs under a bridge, and a good stretch after.
+export const GATE_SPACING = 1000;
+const GATE_CLEAR_BEFORE = 80;
+const GATE_CLEAR_AFTER = 260;
 const ISLAND_FRAC = 0.3;
 
 /** Lateral position of the river's centreline at distance z. */
@@ -60,8 +71,19 @@ export function islandAt(z) {
   const band = Math.floor(z / ISLAND_BAND);
   if (hash1(band, WORLD_SEED ^ 9001) < 0.45) return ISLAND_NONE;
 
+  // No island where a plane is put down. The plane starts — and respawns
+  // after every bridge — on the river's centreline, and an island always
+  // covers the centreline: the very first band used to put a rock face a
+  // hundred units ahead of a player who had not touched a key yet, and a
+  // respawn inside an island band was a respawn on land. The whole island is
+  // dropped rather than trimmed, so its prow stays where its prow rock is.
+  const from = band * ISLAND_BAND + ISLAND_START * ISLAND_BAND;
+  const to = from + ISLAND_SPAN * ISLAND_BAND;
+  const gate = Math.round((from + to) / 2 / GATE_SPACING) * GATE_SPACING;
+  if (to > gate - GATE_CLEAR_BEFORE && from < gate + GATE_CLEAR_AFTER) return ISLAND_NONE;
+
   const local = (z - band * ISLAND_BAND) / ISLAND_BAND;
-  const t = clamp01((local - 0.18) / 0.5);
+  const t = clamp01((local - ISLAND_START) / ISLAND_SPAN);
   if (t <= 0 || t >= 1) return ISLAND_NONE;
 
   // A steep prow and a long tail. The old sine envelope grew the island from

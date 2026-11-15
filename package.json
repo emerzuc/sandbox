@@ -8,7 +8,8 @@
     "preview": "vite preview --port 4173",
     "shots": "node tools/shots.mjs",
     "single": "vite build && node tools/single-file.mjs",
-    "interact": "node tools/interact.mjs"
+    "interact": "node tools/interact.mjs",
+    "sim": "node tools/sim-test.mjs"
   },
   "repository": {
     "type": "git",

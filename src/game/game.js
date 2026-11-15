@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { Player, WING_HALF, PLAYER_Y } from './player.js';
 import {
   spawnChunk, stepEntity, syncEntityMesh, makeEntityMesh,
-  SPEC, BRIDGE_SPACING,
+  SPEC, BRIDGE_SPACING, RUNWAY,
+  FUEL_SEGS, FUEL_SEG_LEN, FUEL_HALF_W, FUEL_HALF_LEN,
 } from './entities.js';
 import { CHUNK_LEN } from '../world/terrain.js';
 import { shoreSDF, riverCenterX } from '../world/river.js';
@@ -18,15 +19,46 @@ const CULL_BEHIND = 90;
 export const FUEL_MAX = 100;
 const FUEL_DRAIN_BASE = 1.55;
 const FUEL_DRAIN_SPEED = 2.6;
-// A depot pass lasts about a third of a second at cruise, so the rate has to
-// be large for the pickup to mean anything. This is deliberately tuned so one
-// clean pass is worth roughly half a tank: two or three depots to refill from
-// empty, and flying slower over one earns more — speed costs fuel twice.
-const FUEL_REFILL = 155;
+// Tuned to the depot's length: a clean pass over all four letters at cruise is
+// worth about half a tank, throttled right back nearly a full one, flat out a
+// third. Every letter shot away takes its quarter with it. Speed costs fuel
+// twice — once to burn, once to miss.
+const FUEL_REFILL = 84;
+// How far to the side of the depot the plane still drinks.
+const FUEL_REACH = 4.5;
+// After a letter goes, the next one cannot be hit for this long. Holding the
+// trigger would otherwise erase the whole depot in under half a second; this
+// leaves time to notice and let go. Shots that arrive meanwhile are absorbed.
+const FUEL_SHIELD = 0.35;
 
 const FIRE_COOLDOWN = 0.115;
 const BULLET_REL_SPEED = 205;
 const BULLET_LIFE = 2.6;
+
+/**
+ * The angled shot. It inherits the plane's sideways motion, so it leaves on a
+ * diagonal toward whichever bank the plane is swinging at — the only way to
+ * reach a shore battery. It is slower than the main gun, and its forward speed
+ * is tied to the plane's own, so the slower the plane the wider the angle:
+ * about 26 degrees flat out, 32 at cruise, 37 throttled back.
+ */
+const ALT_COOLDOWN = 0.13;
+// The angled round bursts where it meets the bank. Measured without this, a
+// battery could only be killed by a shot released inside a 20-unit stretch of
+// the approach — a quarter of a second. A threat needs an answer a person can
+// actually give, so a near miss on the bank counts.
+const ALT_SPLASH = 12;
+const ALT_FWD_SPEED = 95;
+const ALT_LATERAL = 2.3;
+const ALT_LIFE = 2.0;
+
+// A shot this far past the waterline has met the bank. The bank is a cliff, so
+// by here it stands as tall as the shot flies.
+const BANK_HIT_SDF = 5;
+
+// Auto-fire (a thumb on glass, the autopilot) holds its fire when the next
+// thing down the barrel is a depot within this range.
+const HOLD_FIRE_RANGE = 450;
 
 const PLAYER_R = 3.2;
 
@@ -128,6 +160,8 @@ export class Game {
     this.time = 0;
 
     this.overT = 0;
+    this.altCooldown = 0;
+    this.clearUntil = RUNWAY;
     this.lowMix = 0;
     this.beatPhase = 0;
     this.beatEdge = false;
@@ -195,28 +229,33 @@ export class Game {
 
   // ----------------------------------------------------------------- bullets
 
-  fire() {
+  fire(angled = false) {
     const p = this.player;
     let b = this.bulletPool.pop();
     if (!b) {
       b = {
         pos: new THREE.Vector3(),
         prevPos: new THREE.Vector3(),
+        vx: 0,
         vz: 0,
         life: 0,
+        angled: false,
         mesh: new THREE.Mesh(BULLET_GEO, MAT.bullet),
       };
     }
     b.pos.set(p.pos.x, p.pos.y - 0.2, p.pos.z + 5.5);
     b.prevPos.copy(b.pos);
-    b.vz = p.speed + BULLET_REL_SPEED;
-    b.life = BULLET_LIFE;
+    b.angled = angled;
+    b.vx = angled ? p.vx * ALT_LATERAL : 0;
+    b.vz = p.speed + (angled ? ALT_FWD_SPEED : BULLET_REL_SPEED);
+    b.life = angled ? ALT_LIFE : BULLET_LIFE;
     b.mesh.position.copy(b.pos);
+    b.mesh.rotation.y = Math.atan2(b.vx, b.vz);
     this.scene.add(b.mesh);
     this.bullets.push(b);
     this.fx.muzzle(b.pos);
     this.audio?.event('shot');
-    p.fireCooldown = FIRE_COOLDOWN;
+    if (angled) this.altCooldown = ALT_COOLDOWN; else p.fireCooldown = FIRE_COOLDOWN;
   }
 
   recycleBullet(b) {
@@ -317,9 +356,13 @@ export class Game {
     const p = this.player;
     p.step(dt, input);
 
-    if (input.firing && p.fireCooldown <= 0) this.fire();
-    else if (input.consumeFire() && p.fireCooldown <= 0) this.fire();
-    else input.consumeFire();
+    const tapped = input.consumeFire();
+    const hold = input.autoFire && this.depotDownTheBarrel();
+    if (!hold && (input.firing || tapped) && p.fireCooldown <= 0) this.fire();
+
+    this.altCooldown = Math.max(0, this.altCooldown - dt);
+    const tappedAlt = input.consumeFireAlt();
+    if ((input.firingAlt || tappedAlt) && this.altCooldown <= 0) this.fire(true);
 
     const fuelBefore = this.fuel;
     this.leakT = Math.max(0, this.leakT - dt);
@@ -374,12 +417,32 @@ export class Game {
     for (let i = this.bullets.length - 1; i >= 0; i--) {
       const b = this.bullets[i];
       b.prevPos.copy(b.pos);
+      b.pos.x += b.vx * dt;
       b.pos.z += b.vz * dt;
       b.life -= dt;
-      if (b.life <= 0 || b.pos.z > this.player.pos.z + SPAWN_AHEAD) {
+      // Shots stop at the bank and at islands. They used to fly through the
+      // terrain, which was invisible while every shot went straight up-river
+      // and is not once a shot can be aimed at the shore.
+      const banked = shoreSDF(b.pos.x, b.pos.z) > BANK_HIT_SDF;
+      if (banked) {
+        // The burst is drawn at the size it acts at, so the reach is visible.
+        if (b.angled) { this.fx.explosion(b.pos, 0.5); this.burstOnBank(b); } else this.fx.impact(b.pos);
+      }
+      if (banked || b.life <= 0 || b.pos.z > this.player.pos.z + SPAWN_AHEAD) {
         this.recycleBullet(b);
         this.bullets.splice(i, 1);
       }
+    }
+  }
+
+  /** An angled round bursting on the bank takes any battery close by with it. */
+  burstOnBank(b) {
+    for (let i = this.ents.length - 1; i >= 0; i--) {
+      const e = this.ents[i];
+      if (e.kind !== 'tank') continue;
+      const dx = e.pos.x - b.pos.x;
+      const dz = e.pos.z - b.pos.z;
+      if (dx * dx + dz * dz < ALT_SPLASH * ALT_SPLASH) this.destroy(e, i);
     }
   }
 
@@ -406,10 +469,24 @@ export class Game {
       for (let ei = this.ents.length - 1; ei >= 0; ei--) {
         const e = this.ents[ei];
         if (!this.bulletHits(b, e)) continue;
-        this.destroy(e, ei);
+        if (e.kind === 'fuel') this.hitDepot(e, ei); else this.destroy(e, ei);
         this.recycleBullet(b);
         this.bullets.splice(bi, 1);
         break;
+      }
+    }
+
+    // Refuelling is not a collision. It used to sit below the invulnerability
+    // early-out, so a plane fresh from a respawn flew over a depot and got
+    // nothing.
+    for (const e of this.ents) {
+      if (e.kind !== 'fuel') continue;
+      if (
+        Math.abs(p.pos.x - e.pos.x) < FUEL_HALF_W + FUEL_REACH &&
+        p.pos.z > this.depotNearZ(e) - 3 && p.pos.z < e.pos.z + FUEL_HALF_LEN + 3
+      ) {
+        this.fuel = Math.min(FUEL_MAX, this.fuel + FUEL_REFILL * dt);
+        this.audio?.event('refuel');
       }
     }
 
@@ -473,7 +550,9 @@ export class Game {
     for (let i = this.ents.length - 1; i >= 0; i--) {
       const e = this.ents[i];
 
-      if (e.kind === 'rock') continue;
+      // Scenery, and a battery dug into the bank: the land they stand on is
+      // what kills, and it already has. A depot is flown over, not into.
+      if (e.kind === 'rock' || e.kind === 'tank' || e.kind === 'fuel') continue;
 
       if (e.kind === 'bridge') {
         if (Math.abs(z - e.pos.z) < 5.5 && Math.abs(p.pos.x - e.pos.x) < e.halfWidth) {
@@ -489,18 +568,65 @@ export class Game {
       const rr = (PLAYER_R + e.r) ** 2;
       if (dx * dx + dy * dy + dz * dz > rr) continue;
 
+      this.die(e.kind);
+      return;
+    }
+  }
+
+  // ------------------------------------------------------------- fuel depot
+
+  /** World z of the near end of the letters still standing. */
+  depotNearZ(e) {
+    return e.pos.z - FUEL_HALF_LEN + (FUEL_SEGS - e.segs) * FUEL_SEG_LEN;
+  }
+
+  /** One shot, one letter — nearest first. Inside the grace period: nothing. */
+  hitDepot(e, index) {
+    if (e.shield > 0) return;
+    this._tip.set(e.pos.x, 3, this.depotNearZ(e) + FUEL_SEG_LEN / 2);
+    e.segs -= 1;
+    e.shield = FUEL_SHIELD;
+    this.score += SPEC.fuel.score;
+    this.fx.explosion(this._tip, 0.9);
+    this.audio?.event('explosion', { pan: clamp((e.pos.x - this.player.pos.x) / 40, -1, 1) });
+    this.kick(0.22, HITSTOP_KILL * 0.6);
+    if (e.segs <= 0) {
+      this.remove(e);
+      this.ents.splice(index, 1);
+    }
+  }
+
+  /**
+   * Is a depot the next thing in the line of fire? A hostile nearer than the
+   * depot on the same line still gets shot at — the depot only shields what is
+   * behind it.
+   */
+  depotDownTheBarrel() {
+    const p = this.player;
+    let depot = Infinity;
+    let hostile = Infinity;
+    for (const e of this.ents) {
+      const dx = Math.abs(e.pos.x - p.pos.x);
       if (e.kind === 'fuel') {
-        this.fuel = Math.min(FUEL_MAX, this.fuel + FUEL_REFILL * dt);
-        this.audio?.event('refuel');
-      } else {
-        this.die(e.kind);
-        return;
+        if (dx > FUEL_HALF_W + 2 || e.pos.z + FUEL_HALF_LEN < p.pos.z) continue;
+        depot = Math.min(depot, this.depotNearZ(e) - p.pos.z);
+      } else if (e.kind !== 'rock' && e.kind !== 'bridge' && e.kind !== 'tank') {
+        const dz = e.pos.z - p.pos.z;
+        if (dz > 0 && dx < e.r + 2) hostile = Math.min(hostile, dz);
       }
     }
+    return depot < HOLD_FIRE_RANGE && depot < hostile;
   }
 
   bulletHits(b, e) {
     if (e.kind === 'rock' || SPEC[e.kind].shootable === false) return false;
+    if (e.kind === 'fuel') {
+      // Plan view, as in the original: the letters lie flat under the shot.
+      return (
+        Math.abs(b.pos.x - e.pos.x) < FUEL_HALF_W + 0.7 &&
+        b.pos.z > this.depotNearZ(e) - 1.5 && b.pos.z < e.pos.z + FUEL_HALF_LEN
+      );
+    }
     if (e.kind === 'bridge') {
       return (
         Math.abs(b.pos.z - e.pos.z) < 6 &&
@@ -509,7 +635,7 @@ export class Game {
       );
     }
     const dx = b.pos.x - e.pos.x;
-    const dy = b.pos.y - e.pos.y;
+    const dy = b.pos.y - e.pos.y - (SPEC[e.kind].hitY || 0);
     const dz = b.pos.z - e.pos.z;
     return dx * dx + dy * dy + dz * dz < (e.r + 1.4) ** 2;
   }
@@ -528,9 +654,7 @@ export class Game {
       this.audio?.event('bridge', { pan });
       this.kick(0.85, HITSTOP_BRIDGE);
     } else {
-      // The depot has a 9-unit radius and reads as a much bigger object than a
-      // patrol boat; a same-sized blast on it looks like a bug.
-      this.fx.explosion(e.pos, e.kind === 'fuel' ? 1.5 : 1);
+      this.fx.explosion(e.pos, e.kind === 'tank' ? 1.4 : 1);
       this.audio?.event('explosion', { pan });
       this.kick(e.kind === 'jet' ? 0.4 : 0.3, HITSTOP_KILL);
     }
@@ -557,6 +681,7 @@ export class Game {
       return;
     }
     const z = this.checkpointZ;
+    this.clearUntil = z + RUNWAY;
     this.clearEntities();
     this.nextChunk = Math.floor(z / CHUNK_LEN) - 1;
     this.player.reset(riverCenterX(z), z);

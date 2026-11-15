@@ -4,28 +4,56 @@ import { clamp, lerp, damp } from '../core/math.js';
 import { CHUNK_LEN } from '../world/terrain.js';
 import {
   riverCenterX, riverHalfWidth, pickChannelX, islandAt,
-  shoreSDF, terrainHeight, WORLD_SEED,
+  shoreSDF, WORLD_SEED, GATE_SPACING,
 } from '../world/river.js';
 import { makeEntityMesh } from '../view/shapes.js';
 
-export const BRIDGE_SPACING = 1000;
+export const BRIDGE_SPACING = GATE_SPACING;
 const FUEL_SPACING = 700;
 
 /**
- * Collision radius and score per kind. `y` is the nominal altitude; the tank
- * overrides it at spawn with the height of the bank it stands on.
+ * The depot is the original's: four long tanks in a row down the river,
+ * lettered F-U-E-L, red and white. Long on purpose — the old single tank gave
+ * a third of a second of refuelling at cruise, which is a pickup, not a
+ * decision. Forty-four units is over half a second at cruise and nearly a full
+ * second throttled back, so slowing down to drink is a real choice again.
+ * Segment 0 is the near end (the L): a shot takes the nearest letter first.
+ */
+export const FUEL_SEGS = 4;
+export const FUEL_SEG_LEN = 11;
+export const FUEL_HALF_W = 5;
+export const FUEL_HALF_LEN = (FUEL_SEGS * FUEL_SEG_LEN) / 2;
+// Nothing hostile is placed this close, up- or downstream, to a depot in its
+// chunk: a depot that dies to the crossfire aimed at its neighbour is not a
+// choice the player made.
+const FUEL_CLEAR = 70;
+// A depot under a bridge cannot be flown over and cannot be spared by anyone
+// shooting the bridge; keep it this far short of the gate.
+const FUEL_BRIDGE_CLEAR = 150;
+
+/** Stretch of river left empty of hostiles at a (re)start — see game.clearUntil. */
+export const RUNWAY = 350;
+
+/**
+ * Collision radius and score per kind. `y` is the nominal altitude. `hitY`
+ * lifts the centre of the bullet-hit sphere above the origin, for things whose
+ * origin sits at their feet.
  *
- * `shootable: false` marks a kind the player's guns cannot touch — game.js
- * skips it in the bullet pass. The tank keeps an `r` all the same, for the
- * player-vs-entity sphere, even though a plane over land is already dead.
+ * The tank is a shore battery dug in at the waterline. It used to sit on the
+ * crest of the bank, out of reach of every gun the player had — a threat with
+ * no answer, which the playtest called out. It is worth the most of any
+ * regular target because it needs the angled shot and a deliberate swing
+ * toward the bank it is on.
+ *
+ * `fuel.score` is per letter; game.js handles the depot's segments itself.
  */
 export const SPEC = {
   ship: { r: 6.0, score: 30, y: 0 },
   heli: { r: 4.6, score: 60, y: 9 },
   jet: { r: 4.4, score: 100, y: 7 },
-  tank: { r: 4.5, score: 0, y: 0, shootable: false },
+  tank: { r: 4.5, score: 150, y: 1.6, hitY: 2.6 },
   balloon: { r: 5.4, score: 40, y: 7.5 },
-  fuel: { r: 9.0, score: 80, y: 0 },
+  fuel: { r: 0, score: 20, y: 0 },
   bridge: { r: 0, score: 500, y: 7 },
   rock: { r: 0, score: 0, y: 0 },
 };
@@ -43,11 +71,13 @@ export const SPEC = {
  *   - a heli from sector 2 fires back, so it is shot *before* it finishes its
  *     tell, or dodged when it does.
  *
- * Sector 1 is deliberately gentle because the verification harness flies it
- * with an autopilot that never dodges a shell: tanks are rare, their shells
- * slow, and `lead` under 1 means an early shell is aimed short of where a
- * plane flying straight will be — it hits the player who slows down, and
- * whistles behind the one who does not. Full lead only arrives in sector 4.
+ * The curve was halved after the second playtest ("muitos inimigos logo de
+ * cara") and now introduces one idea per sector instead of all of them at
+ * once: sector 1 is ships and helicopters that do not fire — things to shoot,
+ * nothing that shoots back; sector 2 adds jets and balloons; the shore battery
+ * and returning fire only arrive in sector 3, by which time the angled shot
+ * has had two sectors to be discovered. `lead` under 1 means a shell is aimed
+ * short of where a plane flying straight will be; full lead arrives in 5.
  *
  *   density    hostiles per 120-unit chunk (fractional part is a coin flip)
  *   weights    [ship, heli, jet, tank] relative kind weights
@@ -62,12 +92,12 @@ export const SPEC = {
  *   balloon    probability of a balloon per chunk at a choke point
  */
 export const DIFFICULTY = [
-  { density: 0.75, weights: [0.62, 0.30, 0.04, 0.04], jetSpeed: [55, 80], tankFire: 4.5, tankRange: 110, tankCone: 0.60, shellSpeed: 90, lead: 0.55, heliBurst: 0, balloon: 0.10 },
-  { density: 1.00, weights: [0.50, 0.30, 0.11, 0.09], jetSpeed: [60, 88], tankFire: 3.6, tankRange: 130, tankCone: 0.75, shellSpeed: 94, lead: 0.72, heliBurst: 3.4, balloon: 0.18 },
-  { density: 1.35, weights: [0.40, 0.29, 0.16, 0.15], jetSpeed: [68, 96], tankFire: 3.0, tankRange: 150, tankCone: 0.90, shellSpeed: 98, lead: 0.88, heliBurst: 2.7, balloon: 0.26 },
-  { density: 1.70, weights: [0.32, 0.28, 0.21, 0.19], jetSpeed: [76, 106], tankFire: 2.4, tankRange: 170, tankCone: 1.00, shellSpeed: 102, lead: 1.0, heliBurst: 2.2, balloon: 0.34 },
-  { density: 2.10, weights: [0.26, 0.27, 0.25, 0.22], jetSpeed: [84, 116], tankFire: 2.0, tankRange: 190, tankCone: 1.10, shellSpeed: 106, lead: 1.0, heliBurst: 1.8, balloon: 0.42 },
-  { density: 2.60, weights: [0.20, 0.26, 0.29, 0.25], jetSpeed: [92, 126], tankFire: 1.6, tankRange: 210, tankCone: 1.20, shellSpeed: 110, lead: 1.0, heliBurst: 1.4, balloon: 0.50 },
+  { density: 0.35, weights: [0.70, 0.30, 0.00, 0.00], jetSpeed: [55, 80], tankFire: 4.5, tankRange: 110, tankCone: 0.60, shellSpeed: 90, lead: 0.55, heliBurst: 0, balloon: 0 },
+  { density: 0.55, weights: [0.55, 0.27, 0.18, 0.00], jetSpeed: [55, 80], tankFire: 4.5, tankRange: 110, tankCone: 0.60, shellSpeed: 90, lead: 0.55, heliBurst: 0, balloon: 0.15 },
+  { density: 0.80, weights: [0.42, 0.28, 0.16, 0.14], jetSpeed: [60, 88], tankFire: 4.0, tankRange: 130, tankCone: 0.75, shellSpeed: 92, lead: 0.70, heliBurst: 3.2, balloon: 0.22 },
+  { density: 1.10, weights: [0.34, 0.28, 0.20, 0.18], jetSpeed: [68, 96], tankFire: 3.2, tankRange: 150, tankCone: 0.90, shellSpeed: 96, lead: 0.85, heliBurst: 2.6, balloon: 0.30 },
+  { density: 1.50, weights: [0.28, 0.27, 0.24, 0.21], jetSpeed: [76, 106], tankFire: 2.6, tankRange: 170, tankCone: 1.00, shellSpeed: 100, lead: 1.0, heliBurst: 2.1, balloon: 0.38 },
+  { density: 2.00, weights: [0.22, 0.26, 0.28, 0.24], jetSpeed: [84, 116], tankFire: 2.1, tankRange: 190, tankCone: 1.10, shellSpeed: 104, lead: 1.0, heliBurst: 1.7, balloon: 0.45 },
 ];
 
 const WEIGHT_KINDS = ['ship', 'heli', 'jet', 'tank'];
@@ -104,7 +134,21 @@ const TANK_MUZZLE_Y = 2.9;
 // In early sectors every tank within one of these bands takes the same bank,
 // so no stretch is ever bracketed from both sides at once.
 const TANK_BAND = 240;
-const TANK_BRACKET_FROM_SECTOR = 4;
+const TANK_BRACKET_FROM_SECTOR = 5;
+// How far up the bank the battery is dug in. Close enough to the water that a
+// shot fired on the diagonal reaches it before it reaches the cliff behind.
+const TANK_SETBACK = 3.5;
+// Moving the battery down to the water also moved it sixteen units closer to
+// its target, and beside an island the lane is narrow enough that a plane is
+// never more than twenty units from the bank. The autopilot died seven times
+// running to one such gun: a shell with 0.15 s to impact is not a hazard, it
+// is a wall. So: no battery beside an island, and no shot at a plane this
+// close — a shell must have at least half a second of flight to be read.
+const TANK_ISLAND_CLEAR = 60;
+const TANK_MIN_RANGE = 55;
+
+// A ship is twelve units long and sails beam-on to the bank it is heading for.
+const SHIP_MARGIN = 8;
 
 // --- Heli ---
 const HELI_TELL = 0.45;
@@ -113,13 +157,17 @@ const HELI_BURST_GAP = 0.1;
 const HELI_SHOT_SPEED = 150;
 const HELI_GUN_Y = -0.9;
 const HELI_GUN_Z = -2.6;
-const HELI_FIRE_NEAR = 40;
+const HELI_FIRE_NEAR = 130;
 // Floor under every shot of a burst, and the distance the plane closes during
 // the tell (~0.45 s at cruise plus the first gap) so the tell only starts when
 // the whole burst can still be fired from a fair range.
-const HELI_MIN_SHOT_DZ = 70;
+// Both floors are really a time: shot and plane close at ~210 units/s, so 130
+// units is about 0.6 s to impact. The first floor was 70 — a third of a
+// second, under human reaction time — and the harness died four times running
+// to one sector-6 helicopter before it was raised.
+const HELI_MIN_SHOT_DZ = 130;
 const HELI_CLOSE_DURING_TELL = 75;
-const HELI_FIRE_FAR = 260;
+const HELI_FIRE_FAR = 340;
 
 // --- Balloon ---
 const BALLOON_SWAY_X = 1.2;
@@ -174,6 +222,9 @@ function makeEntity(kind, x, y, z) {
     dip: 0,
     // Balloon: the anchor it sways around.
     baseX: x,
+    // Fuel depot: letters still standing, and the grace period after one goes.
+    segs: 0,
+    shield: 0,
   };
 }
 
@@ -201,13 +252,21 @@ export function spawnChunk(game, ci) {
 
   // --- Fuel: placed on a fixed cadence, never left to the dice. Starving the
   // player of fuel by bad luck is not difficulty, it is a bug. ---
-  for (let k = Math.ceil(z0 / FUEL_SPACING); k * FUEL_SPACING < z1; k++) {
-    if (k <= 0) continue;
-    const fz = k * FUEL_SPACING + (rnd() - 0.5) * 120;
-    const fx = pickChannelX(fz, rnd, 7);
+  // A depot belongs to the chunk its centre falls in, wherever its index says
+  // it nominally is — the jitter can carry it across a chunk boundary.
+  for (let k = Math.max(1, Math.floor(z0 / FUEL_SPACING)); (k - 1) * FUEL_SPACING < z1; k++) {
+    const fz = depotZ(k);
+    if (fz < z0 || fz >= z1) continue;
+    const fx = placeDepot(fz, rnd);
     if (fx === null) continue;
-    game.add(makeEntity('fuel', fx, SPEC.fuel.y, fz));
+    const e = makeEntity('fuel', fx, SPEC.fuel.y, fz);
+    e.segs = FUEL_SEGS;
+    game.add(e);
   }
+  // Empty water at a start and after every death: the first thing a new plane
+  // meets must not be a helicopter already in its face.
+  const clearUntil = game.clearUntil ?? -Infinity;
+  const blocked = (z) => z < clearUntil || nearDepot(z);
 
   // --- Island prows: one tall rock at the head of every island, so the split
   // is announced from a distance instead of discovered underfoot. Scenery
@@ -224,11 +283,19 @@ export function spawnChunk(game, ci) {
   // sector is 1-based here to match game.sector. ---
   const sector = Math.floor(z0 / BRIDGE_SPACING) + 1;
   const D = difficultyFor(sector);
-  const n = Math.floor(D.density) + (rnd() < D.density % 1 ? 1 : 0);
+  // Error diffusion instead of a coin flip per chunk. The same average, but
+  // evenly paced: a coin flip at these densities produced long empty runs
+  // followed by clumps, and a clump is exactly the "too many at once" the
+  // playtest objected to. The die is still rolled so the stream stays aligned.
+  rnd();
+  const n = Math.floor(D.density * (ci + 1) + 0.5) - Math.floor(D.density * ci + 0.5);
 
   for (let i = 0; i < n; i++) {
     const z = z0 + rnd() * CHUNK_LEN;
     const kind = pickKind(D.weights, rnd());
+    // The dice are rolled either way, so clearing a stretch does not reshuffle
+    // everything downstream of it.
+    if (blocked(z)) continue;
 
     if (kind === 'tank') {
       spawnTank(game, z, sector, D, rnd);
@@ -256,15 +323,58 @@ export function spawnChunk(game, ci) {
   // --- Balloons: hung where the routing already matters — an island split or
   // a narrow gorge — so blocking one lane is a real choice, not a nuisance.
   // Open water gets them at a reduced rate. ---
-  spawnBalloon(game, z0, z1, D, rnd);
+  spawnBalloon(game, z0, z1, D, rnd, blocked);
 }
 
 /**
- * The bank rises fifteen units over the sixteen past the waterline: a cliff,
- * not a beach. A tank parked "a few units" up it would be half buried on the
- * uphill side and hanging in air on the other. So the tank walks inland from
- * the water's edge until the slope under it eases, and sits on the crest
- * looking down at the river — which is where River Raid II put them anyway.
+ * Where depot k sits along the river. A pure function of k — not of any
+ * chunk's dice — so the clearance around a depot can be honoured by the
+ * chunks either side of it, which never see it spawn.
+ */
+function depotZ(k) {
+  let fz = k * FUEL_SPACING + (hash1(k, WORLD_SEED ^ 0xf0e1) - 0.5) * 120;
+  const kb = Math.round(fz / BRIDGE_SPACING);
+  if (kb > 0 && Math.abs(fz - kb * BRIDGE_SPACING) < FUEL_BRIDGE_CLEAR) {
+    fz = kb * BRIDGE_SPACING - FUEL_BRIDGE_CLEAR;
+  }
+  return fz;
+}
+
+function nearDepot(z) {
+  const k = Math.round(z / FUEL_SPACING);
+  for (let j = Math.max(1, k - 1); j <= k + 1; j++) {
+    if (Math.abs(z - depotZ(j)) < FUEL_CLEAR) return true;
+  }
+  return false;
+}
+
+/**
+ * A depot is 44 units of river long, so one x has to be over water — with room
+ * for a wing either side — along its whole length, bends and island noses
+ * included. A few tries with the chunk's own dice, then give up on this one.
+ */
+function placeDepot(fz, rnd) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const x = pickChannelX(fz, rnd, 10);
+    if (x === null) continue;
+    let clear = true;
+    for (let k = -1; k <= 1 && clear; k++) {
+      const z = fz + k * FUEL_HALF_LEN;
+      if (shoreSDF(x - FUEL_HALF_W - 5, z) > -1 || shoreSDF(x + FUEL_HALF_W + 5, z) > -1) clear = false;
+    }
+    if (clear) return x;
+  }
+  return null;
+}
+
+/**
+ * Shore battery, dug in at the waterline on a concrete footing.
+ *
+ * It began life on the crest of the bank — the slope is a cliff, and a hull
+ * parked on it is half buried — but up there it was fifteen units above every
+ * gun in the game. Down here the angled shot reaches it, and the footing in
+ * the model is what makes a level gun on a steep bank look built rather than
+ * misplaced.
  */
 function spawnTank(game, z, sector, D, rnd) {
   const bracket = sector >= TANK_BRACKET_FROM_SECTOR;
@@ -272,31 +382,19 @@ function spawnTank(game, z, sector, D, rnd) {
     ? (rnd() < 0.5 ? -1 : 1)
     : (hash1(Math.floor(z / TANK_BAND), WORLD_SEED ^ 0x7a9) < 0.5 ? -1 : 1);
 
-  const cx = riverCenterX(z);
-  const hw = riverHalfWidth(z);
-
-  let setback = 4;
-  let x = cx + side * (hw + setback);
-  for (; setback < 17; setback += 2) {
-    x = cx + side * (hw + setback);
-    const slope = (terrainHeight(x + 2.5, z) - terrainHeight(x - 2.5, z)) / 5;
-    if (Math.abs(slope) < 0.45) break;
+  for (let d = -TANK_ISLAND_CLEAR; d <= TANK_ISLAND_CLEAR; d += 20) {
+    if (islandAt(z + d).amt > 0) return;
   }
+  const x = riverCenterX(z) + side * (riverHalfWidth(z) + TANK_SETBACK);
   // By construction this is the outer shore, but the SDF is the one truth
   // about land here, so it gets the final say.
-  if (shoreSDF(x, z) < 3) return;
+  const sd = shoreSDF(x, z);
+  if (sd < 2 || sd > 6) return;
 
-  const e = makeEntity('tank', x, terrainHeight(x, z), z);
+  const e = makeEntity('tank', x, SPEC.tank.y, z);
   e.side = side;
   e.hullYaw = -side * Math.PI / 2; // hull faces straight across the water
   e.aim = e.hullYaw;
-
-  // Fit the hull to the ground: pitch along its facing, roll along the bank.
-  const gx = (terrainHeight(x + 2.5, z) - terrainHeight(x - 2.5, z)) / 5;
-  const gz = (terrainHeight(x, z + 2.5) - terrainHeight(x, z - 2.5)) / 5;
-  const facing = -side;
-  e.pitch = -Math.atan(facing * gx);
-  e.roll = Math.atan(-facing * gz);
 
   e.fireInterval = D.tankFire;
   e.range = D.tankRange;
@@ -310,7 +408,7 @@ function spawnTank(game, z, sector, D, rnd) {
   game.add(e);
 }
 
-function spawnBalloon(game, z0, z1, D, rnd) {
+function spawnBalloon(game, z0, z1, D, rnd, blocked) {
   // Find the tightest lane in the chunk: an island channel or a narrow gorge.
   let bestZ = z0 + CHUNK_LEN * 0.5;
   let bestW = Infinity;
@@ -334,7 +432,7 @@ function spawnBalloon(game, z0, z1, D, rnd) {
   if (kf > 0 && Math.abs(bestZ - kf * FUEL_SPACING) < BALLOON_FUEL_CLEAR) return;
 
   const x = pickChannelX(bestZ, rnd, 6);
-  if (x === null) return;
+  if (x === null || blocked(bestZ)) return;
   const e = makeEntity('balloon', x, SPEC.balloon.y, bestZ);
   e.baseX = x;
   e.phase = rnd() * Math.PI * 2;
@@ -394,7 +492,7 @@ function stepTank(e, dt, player, game) {
   const dx = player.pos.x - e.pos.x;
   const dz = player.pos.z - e.pos.z;
   const dist = Math.hypot(dx, dz);
-  if (dist > e.range || dist < 1) return;
+  if (dist > e.range || dist < TANK_MIN_RANGE) return;
 
   // Forward cone, centred straight across the river: the gun engages only
   // once the plane is roughly abreast, which is when a slow shell can be seen
@@ -464,13 +562,33 @@ export function stepEntity(e, dt, player, game) {
 
   switch (e.kind) {
     case 'ship': {
-      e.pos.x += e.vx * dt;
+      // Patrol the channel it was launched in. It used to turn at the outer
+      // banks only, and so sailed straight through any island in between.
       const cx = riverCenterX(e.pos.z);
-      const hw = riverHalfWidth(e.pos.z) - 8;
-      if (e.pos.x < cx - hw) { e.pos.x = cx - hw; e.vx = Math.abs(e.vx); }
-      if (e.pos.x > cx + hw) { e.pos.x = cx + hw; e.vx = -Math.abs(e.vx); }
+      const hw = riverHalfWidth(e.pos.z);
+      let lo = cx - hw;
+      let hi = cx + hw;
+      const isl = islandAt(e.pos.z);
+      if (isl.amt > 0) {
+        const icx = cx + isl.off;
+        const ihw = isl.hw * isl.amt;
+        if (e.pos.x < icx) hi = icx - ihw; else lo = icx + ihw;
+      }
+      lo += SHIP_MARGIN;
+      hi -= SHIP_MARGIN;
+      if (hi <= lo) {
+        // No room to patrol: hold station mid-channel.
+        e.pos.x = (lo + hi) / 2;
+        break;
+      }
+      e.pos.x += e.vx * dt;
+      if (e.pos.x < lo) { e.pos.x = lo; e.vx = Math.abs(e.vx); }
+      if (e.pos.x > hi) { e.pos.x = hi; e.vx = -Math.abs(e.vx); }
       break;
     }
+    case 'fuel':
+      e.shield = Math.max(0, e.shield - dt);
+      break;
     case 'heli':
       stepHeli(e, dt, player, game);
       break;
@@ -522,6 +640,10 @@ export function syncEntityMesh(e, alpha) {
       }
       break;
     }
+    case 'fuel':
+      // Children are seg0..seg3, near end first; the spent ones are gone.
+      for (let i = 0; i < FUEL_SEGS; i++) e.mesh.children[i].visible = i >= FUEL_SEGS - e.segs;
+      break;
     case 'balloon':
       e.mesh.rotation.y = Math.sin(e.phase * 0.5) * 0.12;
       e.mesh.rotation.z = Math.sin(e.phase) * 0.06;

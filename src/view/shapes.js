@@ -54,6 +54,9 @@ export const MAT = {
   hostileAccent: std(PALETTE.hostileAccent),
 
   fuel: std(PALETTE.fuelBody, { roughness: 0.55 }),
+  fuelRed: std(PALETTE.fuelRed, { roughness: 0.5 }),
+  fuelWhite: std(PALETTE.fuelWhite, { roughness: 0.5 }),
+  fuelLetter: std(PALETTE.fuelLetter, { roughness: 0.6 }),
   bridge: std(PALETTE.bridgeBody),
 
   // Scenery shares the terrain's own palette entries, so a prow rock reads as
@@ -454,35 +457,50 @@ function buildJet() {
  *  reserved for this one object in the whole game — nothing the player must
  *  avoid is ever allowed to wear it. */
 function buildFuel() {
-  const tank = new THREE.LatheGeometry(
-    [
-      new THREE.Vector2(0, 0.6), new THREE.Vector2(3.0, 0.6),
-      new THREE.Vector2(3.4, 1.3), new THREE.Vector2(3.4, 7.2),
-      new THREE.Vector2(3.05, 8.0), new THREE.Vector2(1.7, 8.6),
-      new THREE.Vector2(0, 8.8),
-    ],
-    12
-  );
+  // Must match FUEL_SEGS / FUEL_SEG_LEN / FUEL_HALF_W in game/entities.js.
+  const SEGS = 4;
+  const LEN = 11;
 
-  const deck = tube(6.4, 6.8, 1.0, 12).translate(0, 0.1, 0);
-  const band = new THREE.CylinderGeometry(3.55, 3.55, 1.0, 12, 1, true).translate(0, 4.4, 0);
+  // Chamfered, flat-topped tank: the flat is the signboard.
+  const TANK = [[-1, -0.6], [1, -0.6], [1, 0.5], [0.8, 1], [-0.8, 1], [-1, 0.5]];
+  const TOP = 4.0;
 
-  // Pilings: the depot stands in the water, and the legs are what says so.
-  const pilings = [[4.3, 4.3], [-4.3, 4.3], [4.3, -4.3], [-4.3, -4.3]].map(([x, z]) =>
-    box(0.9, 4.2, 0.9).translate(x, -2.0, z)
-  );
+  // Block capitals on a 4 x 6 grid, [u0, v0, u1, v1] per stroke. They lie flat
+  // on the tank and are laid out for the one viewpoint that matters, a camera
+  // behind and above looking up-river: letter-up is +Z, and letter-right is
+  // world -X, because that is where screen-right falls when flying toward +Z.
+  const GLYPH = {
+    F: [[0, 0, 1, 6], [0, 5, 4, 6], [0, 2.5, 3, 3.5]],
+    U: [[0, 0, 1, 6], [3, 0, 4, 6], [0, 0, 4, 1]],
+    E: [[0, 0, 1, 6], [0, 5, 4, 6], [0, 2.5, 3, 3.5], [0, 0, 4, 1]],
+    L: [[0, 0, 1, 6], [0, 0, 4, 1]],
+  };
+  const S = 1.5;
 
-  const gantry = slab([[1.6, 0.9], [6.1, 0.7], [6.1, -0.7], [1.6, -0.9]], 0.7)
-    .translate(0, 7.4, 0);
-  const hose = tube(0.34, 0.34, 2.6, 6).translate(5.6, 5.9, 0);
-  const vent = tube(0.34, 0.34, 1.8, 6).translate(-1.2, 9.3, 0);
+  // Near end first: the plane arrives at the L and leaves over the F, so the
+  // word reads F-U-E-L from far to near, as it does top to bottom on the 2600.
+  const ORDER = ['L', 'E', 'U', 'F'];
 
-  return assemble([
-    [MAT.fuel, tank],
-    [MAT.bridge, deck], [MAT.bridge, band], [MAT.bridge, gantry],
-    [MAT.bridge, hose], [MAT.bridge, vent],
-    ...pilings.map((p) => [MAT.bridge, p]),
-  ]);
+  const depot = new THREE.Group();
+  for (let i = 0; i < SEGS; i++) {
+    const zc = (i - (SEGS - 1) / 2) * LEN;
+    const half = LEN / 2 - 0.25; // a seam between tanks, so four read as four
+    const body = loft(TANK, [
+      sec(zc - half, 4.4, 1.8, 2.0), sec(zc - half + 0.6, 5, 2, 2),
+      sec(zc + half - 0.6, 5, 2, 2), sec(zc + half, 4.4, 1.8, 2.0),
+    ]);
+    const strokes = GLYPH[ORDER[i]].map(([u0, v0, u1, v1]) =>
+      box((u1 - u0) * S, 0.4, (v1 - v0) * S)
+        .translate(-((u0 + u1) / 2 - 2) * S, TOP + 0.15, ((v0 + v1) / 2 - 3) * S + zc)
+    );
+    const seg = assemble([
+      [i % 2 === 0 ? MAT.fuelWhite : MAT.fuelRed, body],
+      ...strokes.map((g) => [MAT.fuelLetter, g]),
+    ]);
+    seg.name = `seg${i}`;
+    depot.add(seg);
+  }
+  return depot;
 }
 
 /**
@@ -605,10 +623,19 @@ function buildTank() {
   const fenderR = box(1.7, 0.16, 8.0).translate(2.95, 1.62, 0);
   const fenderL = box(1.7, 0.16, 8.0).translate(-2.95, 1.62, 0);
 
+  // Concrete footing. The battery stands level on a bank that is anything
+  // but; the footing runs well below the origin so no slope leaves it hanging,
+  // and a low parapet on top turns "tank on a hill" into "gun emplacement".
+  const footing = loft(HEX, [sec(0, 6.4, 6.4), sec(5.0, 5.6, 5.6)])
+    .rotateX(-Math.PI / 2).translate(0, -4.9, 0);
+  const parapet = loft(HEX, [sec(0, 5.6, 5.6), sec(0.9, 5.2, 5.2)])
+    .rotateX(-Math.PI / 2).translate(0, 0.1, 0);
+
   const g = assemble([
     [MAT.hostile, hull], [MAT.hostile, engineDeck],
     [MAT.hostileDark, trackR], [MAT.hostileDark, trackL],
     [MAT.hostileDark, fenderR], [MAT.hostileDark, fenderL],
+    [MAT.bridge, footing], [MAT.bridge, parapet],
   ]);
 
   // Turret: lofted along +Z and stood up, like the ship's. Pivot sits on the

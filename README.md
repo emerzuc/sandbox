@@ -10,11 +10,14 @@ aviso de combustível no contorno da tela, marcador de posição, raspão com
 penalidade de combustível, ilhas com proa, cinco tipos de inimigo com curva
 de dificuldade por setor, três biomas com domo de céu, recorde persistente.
 Jogável em teclado, toque e gamepad, com tela de início, pausa e mudo.
-Dois gates verdes.
+Segundo playtest aplicado: tiro em diagonal, casamatas na beira d'água,
+postos F-U-E-L de quatro letras, curva de dificuldade pela metade.
+Três gates verdes.
 
 ```
 npm install
 npm run dev      # http://127.0.0.1:5173
+npm run sim      # gate de simulação: regras e geração do mundo, em Node puro
 npm run shots    # gate de mundo e render (headless, SwiftShader)
 npm run interact # gate de interação: início, pausa, mudo, toque, game over
 npm run single   # build em um único HTML autocontido (dist/river-raid.html)
@@ -22,9 +25,14 @@ npm run single   # build em um único HTML autocontido (dist/river-raid.html)
 
 | | Pilotar | Acelerar / frear | Atirar | Pausa |
 |---|---|---|---|---|
-| Teclado | `A` `D` | `W` `S` | `Espaço` | `P` / `Esc` · `M` som · `Enter` reinicia |
-| Toque | arrastar (stick flutuante) | arrastar para cima / baixo | automático ao tocar | botão `II` |
-| Gamepad | analógico ou d-pad | gatilhos | `A` / `X` / `RB` | `Start` |
+| Teclado | `A` `D` | `W` `S` | `Z` ou `Espaço` reto · `X` diagonal | `P` / `Esc` · `M` som · `Enter` reinicia |
+| Toque | arrastar (stick flutuante) | arrastar para cima / baixo | automático; diagonal nas curvas | botão `II` |
+| Gamepad | analógico ou d-pad | gatilhos | `A` reto · `B` diagonal | `Start` |
+
+O tiro em diagonal herda o movimento lateral do avião — sai para o lado em que
+você está indo, e abre mais quanto mais devagar: 26° a toda, 32° no cruzeiro,
+37° freando. É o único que alcança as casamatas da margem, e estilhaça ao bater
+no barranco.
 
 Nada se move até o primeiro input; perder o foco pausa. Parâmetros de URL:
 `?engine=a|b|c` (motor), `?debug` (fps, draws, escala), `?auto`, `?warp=N`,
@@ -45,7 +53,7 @@ Nada se move até o primeiro input; perder o foco pausa. Parâmetros de URL:
 | `view/shaderGuards.js` | Guarda da normal flat-shaded contra `normalize(0)` |
 | `audio/` | Motor por RPM sem batimento, reverb do cânion por largura, mixagem que muda com combustível baixo |
 | `game/game.js` | Sim a 120 Hz com interpolação; relógio de tensão (combustível); raspão; projéteis hostis com um dono só |
-| `game/entities.js` | Navio, helicóptero (rajada com tell), caça, tanque na margem (indesviável, só se desvia), balão de barragem, posto, ponte, pedra de proa; `DIFFICULTY` por setor |
+| `game/entities.js` | Navio (preso ao seu canal), helicóptero (rajada com tell), caça, casamata na beira d'água, balão de barragem, posto F-U-E-L de quatro letras, ponte, pedra de proa; `DIFFICULTY` por setor, um inimigo novo por setor |
 | `view/marker.js` | Sombra de gameplay sob o avião — a sombra física, com sol rasante, cairia deslocada e informaria errado |
 | `art/direction.js` | Paleta única **e** `BIOMES`: deserto âmbar (1–2), gorja de basalto (3–4), frio alto (5+), blend de 400 unidades a partir da ponte |
 | `core/input.js` | Teclado, toque e gamepad atrás de uma interface analógica; bordas com latch |
@@ -69,7 +77,17 @@ fixos em `shots/`. Reprova em:
 - draws > 220 ou triângulos > 800k — tetos derivados da decomposição por passe
   medida em `tools/probe-cost.mjs`, documentada no próprio gate.
 
-- card cobrindo a tela durante o voo.
+- card cobrindo a tela durante o voo;
+- **três mortes no mesmo ponto** — uma morte para inimigo é o bot jogando mal;
+  três no mesmo lugar é um lugar por onde ninguém passa.
+
+`npm run sim` roda em Node, sem navegador: 28 asserções sobre o que o segundo
+playtest reclamou, cada uma fixada como regra — pista livre no início e no
+respawn, nada atira de volta antes do setor 3, navio nunca sai da água (testado
+nos dois canais de cada ilha), posto perde uma letra por tiro com 0,35 s de
+graça, voar devagar reabastece mais, ângulos do tiro diagonal, e a janela real
+para destruir uma casamata (0,40–0,47 s de aproximação, medida de 2 em 2
+unidades).
 
 `npm run interact` cobre o que o piloto automático nunca toca — os caminhos que
 uma pessoa usa: tela de início, pausa, mudo, polegar no vidro (eventos de toque
@@ -137,6 +155,30 @@ Rodada "jogável por qualquer um":
     "esconder" era tratado como não-mudança. Nenhum gate numérico viu; um
     screenshot em retrato viu. Virou gate.
 
+Segundo playtest ("navios dentro das montanhas", "helicóptero na cara",
+"muitos inimigos", "impossível escapar dos canhões", "o posto morre junto"):
+
+12. **Navio atravessando ilha.** Patrulhava de margem a margem do rio inteiro.
+    Agora fica no canal em que nasceu.
+13. **Ilha na linha de largada.** Descoberto pelo teste, não pelo jogador: o
+    avião nasce na linha de centro e havia uma ilha a 100 unidades do início —
+    quem não desviasse no primeiro segundo morria. Pior, o respawn usava a
+    mesma linha, que dentro de uma faixa de ilha é sempre terra. Ilhas não
+    existem mais perto de uma largada ou de uma ponte.
+14. **Casamata à queima-roupa.** Descer o canhão para a beira d'água o deixou
+    16 unidades mais perto do alvo; num canal estreito ao lado de uma ilha o
+    obus tinha 0,15 s de voo. O piloto morreu sete vezes seguidas ali. Sem
+    casamata ao lado de ilha; piso de distância para atirar.
+15. **Piso de rajada medido em distância, não em tempo.** 70 unidades eram um
+    terço de segundo até o impacto. Subiu para ~0,6 s.
+16. **Piloto atravessando a linha do tiro.** A busca de brecha avaliava o
+    destino, não o caminho: saía de uma posição segura e cruzava o rio pelo
+    ponto exato onde o obus chegaria.
+17. **Sem reabastecer durante a invulnerabilidade.** O teste de posto ficava
+    abaixo do retorno antecipado de invulnerável.
+18. **Zona livre do posto só valia no próprio chunk.** A posição do posto virou
+    função pura do índice, para os chunks vizinhos também respeitarem.
+
 ## Como a fase 2 foi feita
 
 Seis agentes em paralelo, cada um dono de um conjunto disjunto de arquivos,
@@ -147,7 +189,8 @@ juntos.
 
 ## Próximo
 
-Balanceamento com gente jogando: a curva por setor foi desenhada por um agente
-e validada só por um piloto que sabe onde está tudo. Escolha do motor de
+Terceiro playtest: a curva foi cortada pela metade e o tiro diagonal é novo —
+a janela para acertar uma casamata está medida, mas se ela é *gostosa* de
+acertar só um jogador diz. Escolha do motor de
 ouvido. Teste em celular de verdade — toque e retrato foram verificados por
 evento sintético e screenshot, não por um polegar. Gate de fps em GPU real.

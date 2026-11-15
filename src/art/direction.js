@@ -65,6 +65,12 @@ export const PALETTE = {
   hostileBody: 0x6b6f6a,
   hostileAccent: 0x8c3a2a,
   fuelBody: 0x3f7a52,
+  // The depot wears the original's livery: red and white tanks, blue letters.
+  // Red elsewhere in this palette means danger, so the depot never uses it
+  // alone — always striped against white and under a letter.
+  fuelRed: 0xc23a2c,
+  fuelWhite: 0xe9e5d9,
+  fuelLetter: 0x263a94,
   bridgeBody: 0x4a4340,
 
   // --- Effects: the only place fully saturated emissive is allowed ---
