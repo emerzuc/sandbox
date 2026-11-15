@@ -69,6 +69,8 @@ export const PALETTE = {
 
   // --- Effects: the only place fully saturated emissive is allowed ---
   tracer: 0xffd166,
+  /** Incoming fire. The one hue reserved for "this will kill you". */
+  hostileTracer: 0xff4a2e,
   muzzle: 0xfff2c4,
   explosionCore: 0xfff0c0,
   explosionMid: 0xf58a3c,

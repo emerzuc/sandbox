@@ -11,6 +11,8 @@ const LOOK_AHEAD = 46;
 
 const FOV_BASE = 60;
 const FOV_KICK = 11;
+const MIN_HALF_HFOV_TAN = Math.tan((36 * Math.PI) / 180);
+const MAX_VFOV = 96;
 
 const SHAKE_POS = 1.5;
 const SHAKE_ROT = 0.035;
@@ -77,8 +79,13 @@ export class CameraRig {
 
     const targetFov = FOV_BASE + p.speed01 * FOV_KICK + shake * 4;
     this.fov = damp(this.fov, targetFov, 5, dt);
-    if (Math.abs(this.camera.fov - this.fov) > 0.01) {
-      this.camera.fov = this.fov;
+    // The FOV is vertical, so a portrait phone would see a slot of river with
+    // no banks. Below ~3:2, open the vertical angle to keep a minimum
+    // horizontal one, and let the speed kick ride on top of it.
+    const minV = (2 * Math.atan(MIN_HALF_HFOV_TAN / this.camera.aspect) * 180) / Math.PI;
+    const out = Math.min(MAX_VFOV, Math.max(this.fov, minV + (this.fov - FOV_BASE)));
+    if (Math.abs(this.camera.fov - out) > 0.01) {
+      this.camera.fov = out;
       this.camera.updateProjectionMatrix();
     }
   }

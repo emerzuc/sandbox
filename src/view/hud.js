@@ -21,6 +21,16 @@ export class Hud {
     this.center = $('center');
     this.title = $('c-title');
     this.sub = $('c-sub');
+    this.keysLine = $('c-keys');
+    this.stick = $('stick');
+    this.knob = $('knob');
+    this.pauseBtn = $('pauseBtn');
+    this.coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+    // null, not '': the markup ships with the card visible, so the very first
+    // showCard('') has to be seen as a change or a game that starts already
+    // running (autopilot) keeps the title over the action forever.
+    this._card = null;
+    this.crosshair = $('crosshair');
     this.perf = $('perf');
     this.pulse = $('pulse');
     this.banner = $('banner');
@@ -30,12 +40,23 @@ export class Hud {
     this.edgeL = $('edgeL');
     this.edgeR = $('edgeR');
 
-    this.introT = 0;
-    this.dismissed = false;
     this._lastState = 'playing';
+    if (!this.perf.textContent) this.perf.style.display = 'none';
   }
 
-  update(game, dt, input, perf) {
+  /** One card, four faces. Text is only written when the face changes. */
+  showCard(key, title, sub, keys) {
+    if (key === this._card) return;
+    this._card = key;
+    this.center.classList.toggle('hidden', !key);
+    this.crosshair.style.opacity = key ? '0' : '';
+    if (!key) return;
+    this.title.textContent = title;
+    this.sub.textContent = sub;
+    this.keysLine.textContent = keys || '';
+  }
+
+  update(game, dt, input, perf, mode = 'run') {
     if (game.score !== this._score) {
       this._score = game.score;
       this.score.textContent = String(game.score).padStart(5, '0');
@@ -82,34 +103,60 @@ export class Hud {
 
     this.speedFill.style.transform = `scaleX(${game.player.speed01.toFixed(3)})`;
 
-    // Intro card clears on the first input, or on its own after a few seconds.
-    this.introT += dt;
-    if (!this.dismissed && (this.introT > 4.5 || input.lateral || input.throttle || input.firing)) {
-      this.dismissed = true;
-    }
+    // Hints follow the device actually in use, not the one guessed at load.
+    const touch = input.kind === 'touch' || (this.coarse && input.kind !== 'pad');
+    const pad = input.kind === 'pad';
 
     if (game.state !== this._lastState) {
-      const prev = this._lastState;
       this._lastState = game.state;
       if (game.state === 'gameover') {
-        const record = game.score > this.bestScore;
-        if (record) {
+        this._record = game.score > this.bestScore;
+        if (this._record) {
           this.bestScore = game.score;
           this.best.textContent = String(this.bestScore).padStart(5, '0');
           try { localStorage.setItem(BEST_KEY, String(this.bestScore)); } catch { /* no storage */ }
         }
-        this.title.textContent = record ? 'Novo recorde' : 'Fim de jogo';
-        this.sub.textContent = `Pontos ${game.score} · Setor ${game.sector} · Recorde ${this.bestScore} · Enter para reiniciar`;
-        this.dismissed = false;
-        this.introT = 0;
-      } else if (prev === 'gameover') {
-        this.dismissed = true;
       }
     }
 
-    const showCenter = game.state === 'gameover' || !this.dismissed;
-    this.center.classList.toggle('hidden', !showCenter);
+    if (mode === 'ready') {
+      this.showCard(
+        `ready-${touch}-${pad}`,
+        'River Raid 3D',
+        touch ? 'Toque para começar' : pad ? 'Aperte um botão para começar' : 'Aperte uma tecla ou clique para começar',
+        touch ? 'Arraste para pilotar · para cima acelera, para baixo freia · o tiro é automático'
+          : pad ? 'Analógico pilota · gatilhos aceleram e freiam · A atira · Start pausa'
+          : 'A/D pilotar · W/S acelerar e frear · Espaço atirar · P pausa · M som'
+      );
+    } else if (mode === 'paused') {
+      this.showCard(
+        `paused-${touch}-${pad}`,
+        'Pausado',
+        touch ? 'Toque para continuar' : pad ? 'Start para continuar' : 'P ou qualquer tecla para continuar',
+        ''
+      );
+    } else if (game.state === 'gameover') {
+      this.showCard(
+        `over-${game.score}-${touch}-${pad}`,
+        this._record ? 'Novo recorde' : 'Fim de jogo',
+        `${game.score} pontos · setor ${game.sector} · recorde ${this.bestScore}`,
+        touch ? 'Toque para jogar de novo' : pad ? 'A para jogar de novo' : 'Enter para jogar de novo'
+      );
+    } else {
+      this.showCard('');
+    }
 
-    if (perf) this.perf.textContent = perf;
+    // Floating stick: drawn where the thumb landed, so the player can see the
+    // centre they are steering around.
+    const t = input.touch;
+    const stickOn = !!(t && t.active && mode === 'run');
+    this.stick.style.opacity = stickOn ? '1' : '0';
+    if (stickOn) {
+      this.stick.style.transform = `translate(${t.x0}px, ${t.y0}px)`;
+      this.knob.style.transform = `translate(${t.x - t.x0}px, ${t.y - t.y0}px)`;
+    }
+    this.pauseBtn.style.opacity = mode === 'run' && game.state === 'playing' ? '' : '0';
+
+    if (perf) { this.perf.style.display = ''; this.perf.textContent = perf; }
   }
 }

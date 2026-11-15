@@ -45,7 +45,14 @@ const ENTITY_LAYER = 1;
 // glance.
 const HOSTILE_SHOT_LIFE = 3.2;
 const HOSTILE_SHOT_R = 1.7;
-const HOSTILE_MAT = new THREE.MeshBasicMaterial({ color: PALETTE.hostileAccent });
+// Brighter than display white on purpose: the scene target is half-float, so
+// this lands above the bloom threshold and the shell carries its own glow. The
+// first version was the dark hostile accent on dark water — a threat the
+// player was expected to dodge and could not see.
+const HOSTILE_MAT = new THREE.MeshBasicMaterial({
+  color: new THREE.Color(PALETTE.hostileTracer).multiplyScalar(2.6),
+});
+const HOSTILE_SHOT_SCALE = [2.6, 2.6, 1.9];
 
 const HITSTOP_KILL = 0.055;
 const HITSTOP_BRIDGE = 0.11;
@@ -120,6 +127,7 @@ export class Game {
     this.trauma = 0;
     this.time = 0;
 
+    this.overT = 0;
     this.lowMix = 0;
     this.beatPhase = 0;
     this.beatEdge = false;
@@ -230,6 +238,7 @@ export class Game {
         life: 0,
         mesh: new THREE.Mesh(BULLET_GEO, HOSTILE_MAT),
       };
+      s.mesh.scale.fromArray(HOSTILE_SHOT_SCALE);
     }
     s.pos.set(x, y, z);
     s.prevPos.copy(s.pos);
@@ -288,7 +297,12 @@ export class Game {
     this.trauma = Math.max(0, this.trauma - dt * 1.5);
 
     if (this.state === 'gameover') {
-      if (input.consumeRestart()) this.reset();
+      // A short lockout: the player is usually still mashing fire when the
+      // last plane goes, and with touch a tap is both. Presses latched before
+      // the card has been readable are thrown away, not honoured late.
+      this.overT += dt;
+      const pressed = input.consumeRestart();
+      if (pressed && this.overT > 0.9) this.reset();
       return;
     }
 
@@ -539,6 +553,7 @@ export class Game {
     this.lives -= 1;
     if (this.lives <= 0) {
       this.state = 'gameover';
+      this.overT = 0;
       return;
     }
     const z = this.checkpointZ;

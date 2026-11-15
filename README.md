@@ -8,17 +8,27 @@ avião minúsculo contra paisagem imensa. Ver `src/art/direction.js`.
 terreno pintado com sombras, pós, áudio sintetizado, modelos, VFX) mais:
 aviso de combustível no contorno da tela, marcador de posição, raspão com
 penalidade de combustível, ilhas com proa, cinco tipos de inimigo com curva
-de dificuldade por setor, três biomas, recorde persistente. Gate verde.
+de dificuldade por setor, três biomas com domo de céu, recorde persistente.
+Jogável em teclado, toque e gamepad, com tela de início, pausa e mudo.
+Dois gates verdes.
 
 ```
 npm install
 npm run dev      # http://127.0.0.1:5173
-npm run shots    # harness de verificação (headless, SwiftShader)
+npm run shots    # gate de mundo e render (headless, SwiftShader)
+npm run interact # gate de interação: início, pausa, mudo, toque, game over
+npm run single   # build em um único HTML autocontido (dist/river-raid.html)
 ```
 
-Controles: clique na tela · `A`/`D` mover · `W`/`S` acelerar · `Espaço` atirar
-· `Enter` reiniciar. Parâmetros de URL: `?engine=a|b|c` (três motores para
-escolher de ouvido), `?auto` (piloto automático), `?warp=N`, `?lives=N`.
+| | Pilotar | Acelerar / frear | Atirar | Pausa |
+|---|---|---|---|---|
+| Teclado | `A` `D` | `W` `S` | `Espaço` | `P` / `Esc` · `M` som · `Enter` reinicia |
+| Toque | arrastar (stick flutuante) | arrastar para cima / baixo | automático ao tocar | botão `II` |
+| Gamepad | analógico ou d-pad | gatilhos | `A` / `X` / `RB` | `Start` |
+
+Nada se move até o primeiro input; perder o foco pausa. Parâmetros de URL:
+`?engine=a|b|c` (motor), `?debug` (fps, draws, escala), `?auto`, `?warp=N`,
+`?lives=N`.
 
 ## Arquitetura
 
@@ -38,6 +48,8 @@ escolher de ouvido), `?auto` (piloto automático), `?warp=N`, `?lives=N`.
 | `game/entities.js` | Navio, helicóptero (rajada com tell), caça, tanque na margem (indesviável, só se desvia), balão de barragem, posto, ponte, pedra de proa; `DIFFICULTY` por setor |
 | `view/marker.js` | Sombra de gameplay sob o avião — a sombra física, com sol rasante, cairia deslocada e informaria errado |
 | `art/direction.js` | Paleta única **e** `BIOMES`: deserto âmbar (1–2), gorja de basalto (3–4), frio alto (5+), blend de 400 unidades a partir da ponte |
+| `core/input.js` | Teclado, toque e gamepad atrás de uma interface analógica; bordas com latch |
+| `view/sky.js` | Domo de céu em três paradas que os biomas pintam; a água reflete |
 | `core/autopilot.js` | Piloto determinístico — é o harness, não feature |
 
 Decisões que sustentam o resto: mundo como função pura (colisão exata,
@@ -56,6 +68,13 @@ fixos em `shots/`. Reprova em:
 - **morte contra o terreno** — canal impossível é bug, não dificuldade;
 - draws > 220 ou triângulos > 800k — tetos derivados da decomposição por passe
   medida em `tools/probe-cost.mjs`, documentada no próprio gate.
+
+- card cobrindo a tela durante o voo.
+
+`npm run interact` cobre o que o piloto automático nunca toca — os caminhos que
+uma pessoa usa: tela de início, pausa, mudo, polegar no vidro (eventos de toque
+reais via CDP), lockout do game over, e a escala de resolução, acionada pela
+própria lentidão do SwiftShader.
 
 Morte para inimigo ou por tanque vazio é reportada, não reprova; cada morte por
 tiro registra origem e velocidade do projétil. O piloto roda com `lives=9`
@@ -102,6 +121,22 @@ Fase 3:
    dobradas pela reflexão: 252 draws. Entidades em layer própria que a câmera
    espelhada não vê; o avião continua refletindo porque é pista de posição.
 
+Rodada "jogável por qualquer um":
+
+8. **O jogo começava sem o jogador.** Dentro de um iframe a página não tem foco
+   ao carregar; o avião voava sozinho até bater. Três modos no laço — pronto,
+   rodando, pausado — e nada se move antes do primeiro input.
+9. **Tiro inimigo invisível.** Dardo no vermelho escuro de acento sobre água
+   escura: uma ameaça que o jogador devia desviar e não via. Cor própria em
+   HDR, acima do limiar de bloom.
+10. **Escala de resolução cega para máquina lenta.** O filtro de hitch
+    descartava todo frame acima de 100 ms — ou seja, todos os frames de quem
+    roda a 8 fps. Mediana em vez de média filtrada. Pego pelo gate de
+    interação.
+11. **Título por cima do jogo.** O card nascia visível no HTML e o primeiro
+    "esconder" era tratado como não-mudança. Nenhum gate numérico viu; um
+    screenshot em retrato viu. Virou gate.
+
 ## Como a fase 2 foi feita
 
 Seis agentes em paralelo, cada um dono de um conjunto disjunto de arquivos,
@@ -113,6 +148,6 @@ juntos.
 ## Próximo
 
 Balanceamento com gente jogando: a curva por setor foi desenhada por um agente
-e validada só por um piloto que sabe onde está tudo. Escolha do motor
-(`?engine=`). Materiais de entidade seguindo o bioma (hoje ficam âmbar).
-Gate de fps em GPU real.
+e validada só por um piloto que sabe onde está tudo. Escolha do motor de
+ouvido. Teste em celular de verdade — toque e retrato foram verificados por
+evento sintético e screenshot, não por um polegar. Gate de fps em GPU real.

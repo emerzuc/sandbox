@@ -101,6 +101,8 @@ for (const warp of WARPS) {
       deaths: game.deaths,
       draws: renderer.info.render.calls,
       tris: renderer.info.render.triangles,
+      card: document.getElementById('center').classList.contains('hidden')
+        ? '' : document.getElementById('c-title').textContent,
     };
   });
 
@@ -135,6 +137,11 @@ for (const warp of WARPS) {
 
   if (errors.length) problems.push(`t=${warp}s console: ${[...new Set(errors)].slice(0, 3).join(' | ')}`);
   if (luma < 5) problems.push(`t=${warp}s frame is black (luma ${luma})`);
+  // Caught by eye in a portrait capture, missed by every numeric gate: a card
+  // left over the action. While the plane is flying, nothing covers the view.
+  if (state.state === 'playing' && state.card) {
+    problems.push(`t=${warp}s card "${state.card}" is covering the game during play`);
+  }
   // Mid-death with lives left is a 1.15 s transient the probe can land on;
   // game over is the failure.
   if (state.state !== 'playing' && !(state.state === 'dying' && state.lives > 0)) {

@@ -6,7 +6,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --port 4173",
-    "shots": "node tools/shots.mjs"
+    "shots": "node tools/shots.mjs",
+    "single": "vite build && node tools/single-file.mjs",
+    "interact": "node tools/interact.mjs"
   },
   "repository": {
     "type": "git",

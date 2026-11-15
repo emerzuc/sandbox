@@ -108,12 +108,31 @@ export class Audio {
         this.out.gain.exponentialRampToValueAtTime(OUT_LEVEL, t + 0.6);
       }
       this.ready = true;
+      this.master.gain.value = this.muted ? 0 : 1;
       return true;
     } catch (_) {
       this.failed = true;
       this.ready = false;
       return false;
     }
+  }
+
+  /** Mute is a master-gain fade, so it is click-free and survives a pause. */
+  setMuted(muted) {
+    this.muted = !!muted;
+    if (!this.master || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    this.master.gain.cancelScheduledValues(t);
+    this.master.gain.setTargetAtTime(this.muted ? 0 : 1, t, 0.03);
+  }
+
+  /** Pause suspends the whole context: every voice freezes mid-sample. */
+  setPaused(paused) {
+    if (!this.ctx || !this.started) return;
+    try {
+      const p = paused ? this.ctx.suspend() : this.ctx.resume();
+      if (p && p.catch) p.catch(() => {});
+    } catch (_) { /* a context that will not suspend just keeps playing */ }
   }
 
   #build() {

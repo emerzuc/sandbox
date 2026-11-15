@@ -1,11 +1,15 @@
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <link rel="icon" href="data:,">
 <title>River Raid 3D</title>
 <style>
   :root { color-scheme: dark; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; background: #14171a; overflow: hidden; }
-  canvas { display: block; }
+  /* The canvas is the controller on a phone: no scroll, no zoom, no selection,
+     no long-press menu — every gesture belongs to the game. */
+  canvas { display: block; touch-action: none; outline: none; -webkit-tap-highlight-color: transparent; }
+  body { overscroll-behavior: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 
   #hud {
     position: fixed; inset: 0; pointer-events: none;
@@ -33,8 +37,37 @@
     text-align: center; gap: 10px;
   }
   #center.hidden { display: none; }
-  #center h1 { font-size: 30px; font-weight: 600; letter-spacing: .02em; }
-  #center p  { font-size: 13px; opacity: .62; }
+  #center { padding: 0 20px; background: radial-gradient(ellipse at center, rgba(8,10,12,.55), transparent 62%); }
+  #center h1 { font-size: 34px; font-weight: 600; letter-spacing: .06em; text-wrap: balance; }
+  #center p  { font-size: 14px; opacity: .9; }
+  #center p#c-keys { font-size: 12px; opacity: .6; max-width: 46ch; margin: 0 auto; text-wrap: balance; }
+
+  #stick {
+    position: absolute; left: -48px; top: -48px; width: 96px; height: 96px;
+    border: 1.5px solid rgba(232,234,237,.35); border-radius: 50%;
+    opacity: 0; will-change: transform, opacity;
+  }
+  #knob {
+    position: absolute; left: 30px; top: 30px; width: 34px; height: 34px;
+    border-radius: 50%; background: rgba(232,234,237,.5); will-change: transform;
+  }
+
+  #pauseBtn {
+    position: absolute; top: 10px; left: 50%; margin-left: -22px;
+    width: 44px; height: 44px; padding: 0; border: 0; background: none;
+    color: #e8eaed; opacity: .4; cursor: pointer; pointer-events: auto;
+    font: inherit; font-size: 15px; letter-spacing: .1em;
+  }
+  #pauseBtn:hover, #pauseBtn:focus-visible { opacity: .9; }
+  #pauseBtn:focus-visible { outline: 1.5px solid #e8eaed; outline-offset: -6px; }
+
+  @media (max-width: 640px) {
+    .bar { width: 132px; }
+    #speedbar { width: 64px; }
+    #bottom { gap: 14px; padding: 12px; }
+    #banner { font-size: 20px; }
+    #center h1 { font-size: 26px; }
+  }
 
   #crosshair {
     position: absolute; left: 50%; top: 58%; width: 16px; height: 16px;
@@ -112,8 +145,12 @@
 
   <div id="center">
     <h1 id="c-title">River Raid 3D</h1>
-    <p id="c-sub">Clique na tela para começar · A/D mover · W/S acelerar · Espaço atirar</p>
+    <p id="c-sub"></p>
+    <p id="c-keys"></p>
   </div>
+
+  <div id="stick"><div id="knob"></div></div>
+  <button id="pauseBtn" type="button" aria-label="Pausar">II</button>
 
   <div id="perf"></div>
 </div>
